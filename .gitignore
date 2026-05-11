@@ -1,0 +1,54 @@
+# --- Security (Lattice Standard) ---
+.env
+.env.*
+!.env.example
+!.env.template
+CLAUDE.md
+GEMINI.md
+AGENTS.md
+.claude/
+.gemini/
+.cursor/
+credentials.md
+credentials.json
+credentials.yaml
+*.key
+*.pem
+*.secret
+active-work.md
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.egg
+.Python
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Build and distribution
+build/
+dist/
+*.whl
+
+# Test and lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
