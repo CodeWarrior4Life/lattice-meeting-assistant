@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lattice-meeting-assistant"
+version = "0.1.0.dev0"
+description = "In-meeting AI assistant primitive for Lattice meeting-platform adapters (Zoom v0.1; Meet/Teams v0.2+)."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "CodeWarrior4Life" }]
+keywords = ["lattice", "meeting", "assistant", "zoom", "private-chat", "cortex"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Chat",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Framework :: AsyncIO",
+]
+dependencies = [
+    # Lattice family pins (git+ because not on PyPI yet; intended semantic
+    # ranges recorded in CHANGELOG -- swap to version specifiers post-publish).
+    "lattice-meeting-contracts @ git+https://github.com/CodeWarrior4Life/lattice-meeting-contracts.git@v0.3.0-rc2",
+    "lattice-meeting @ git+https://github.com/CodeWarrior4Life/lattice-meeting.git@v0.2.0",
+    "lattice-cortex @ git+https://github.com/CodeWarrior4Life/lattice-cortex.git@v0.6.0",
+    # Direct deps
+    "httpx>=0.24.0",
+    "pydantic>=2.0.0",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.0.0",
+    "mypy>=1.8.0",
+    "types-PyYAML>=6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/CodeWarrior4Life/lattice-meeting-assistant"
+Repository = "https://github.com/CodeWarrior4Life/lattice-meeting-assistant"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
+python_version = "3.11"
+files = ["src"]
+
+[tool.coverage.run]
+source = ["src/lattice_meeting_assistant"]
+omit = ["*/tests/*"]
+
+[tool.coverage.report]
+fail_under = 0  # gates are AC-7 (AQH PASS) + AC-5 critical-path coverage, not raw %

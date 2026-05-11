@@ -1,0 +1,12 @@
+# Mirror of pyproject.toml `dependencies` for tools that prefer this format.
+# Source of truth: pyproject.toml.
+
+# Lattice family pins (git+ because not on PyPI yet)
+lattice-meeting-contracts @ git+https://github.com/CodeWarrior4Life/lattice-meeting-contracts.git@v0.3.0-rc2
+lattice-meeting @ git+https://github.com/CodeWarrior4Life/lattice-meeting.git@v0.2.0
+lattice-cortex @ git+https://github.com/CodeWarrior4Life/lattice-cortex.git@v0.6.0
+
+# Direct deps
+httpx>=0.24.0
+pydantic>=2.0.0
+PyYAML>=6.0
