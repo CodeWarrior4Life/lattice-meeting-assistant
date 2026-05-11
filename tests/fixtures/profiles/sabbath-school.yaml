@@ -1,0 +1,28 @@
+schema_version: 1
+profile_id: sabbath-school
+series_id: sabbath-school-class
+dm_allowlist:
+  - cyril-grosse
+  - helen-christopherson
+  - helen-brager
+  - pat-grauer
+admins:
+  - cyril-grosse
+dm_min_confidence: 0.85
+allow_mapped_dm: true
+allow_anonymous_dm: false
+public_mentions_enabled: true
+public_mention_allowlist: ~
+public_mention_rate_limit_per_meeting_s: 30
+knowledge:
+  allow_personal_vault: false
+  transcript_hot_window_seconds: 300
+  enable_transcript_search_tool: true
+  enable_past_meetings_search: true
+  enable_public_references_tool: true
+  enable_web_search: true
+  public_references: []
+series_match_binding: explicit
+series_match_confidence: high
+source_vault_note: "02_Projects/Lattice/lattice-meetbot/Profiles/sabbath-school.yaml"
+in_memory_mutations_history: []

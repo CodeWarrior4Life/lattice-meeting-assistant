@@ -9,11 +9,25 @@ from __future__ import annotations
 from typing import Literal
 
 from ._version import __version__
+from .config import AssistantConfig, KnowledgeAccessConfig
 from .exceptions import (
     AdminAuthorizationDenied,
     CapabilityNotSupported,
     CortexUnavailable,
     PrivacyBoundaryViolation,
+)
+from .profile import (
+    AssistantProfile,
+    dump_profile_to_yaml,
+    load_profile_from_yaml,
+)
+from .types import (
+    AdminCommandResult,
+    AssistantStats,
+    CanonicalPersonaId,
+    ChatEvent,
+    ConversationTurn,
+    ProfileMutation,
 )
 
 TierName = Literal["interactive", "research"]
@@ -21,8 +35,23 @@ TierName = Literal["interactive", "research"]
 __all__ = [
     "__version__",
     "TierName",
+    # Exceptions
     "PrivacyBoundaryViolation",
     "AdminAuthorizationDenied",
     "CapabilityNotSupported",
     "CortexUnavailable",
+    # Config
+    "AssistantConfig",
+    "KnowledgeAccessConfig",
+    # Profile
+    "AssistantProfile",
+    "ProfileMutation",
+    "load_profile_from_yaml",
+    "dump_profile_to_yaml",
+    # Types
+    "ChatEvent",
+    "ConversationTurn",
+    "AdminCommandResult",
+    "AssistantStats",
+    "CanonicalPersonaId",
 ]
