@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 
 from .actor import POST_LEAVE_GRACE_SECS_DEFAULT, ChatThreadActor
 from .brain_client import BrainMCPClient
@@ -49,6 +50,8 @@ from .privacy.invariants import (
     is_admin_command_syntax,
 )
 from .profile import AssistantProfile
+from .prompts import render_in_meeting_dm_prompt, render_public_mention_prompt
+from .public_mentions import PublicMentionHandler
 from .tools.resolver import resolve_tool_set
 
 logger = logging.getLogger(__name__)
@@ -151,6 +154,13 @@ class Assistant:
         # ``(meeting_id, "public")`` for the public-mention singleton.
         self._actors: dict[tuple[str, str], ChatThreadActor] = {}
         self._reap_timers: dict[tuple[str, str], asyncio.TimerHandle] = {}
+
+        # Public-mention policy gates (W6.2). The handler owns
+        # per-meeting rate-limit state + the enabled/allowlist
+        # short-circuits per spec §3 lines 261-265 + spec §11 R5.
+        self._public_mention_handler: PublicMentionHandler = PublicMentionHandler(
+            profile=profile,
+        )
 
     # -----------------------------------------------------------------
     # Lifecycle
@@ -304,35 +314,120 @@ class Assistant:
         # T2 / T3 split on confidence threshold.
         return confidence >= self.profile.dm_min_confidence
 
-    def _render_system_prompt(self) -> str:
-        """Trivial system-prompt renderer for W4.
+    # ---------------------------------------------------------------------
+    # System-prompt renderers (W6.1+)
+    # ---------------------------------------------------------------------
 
-        W5 wires the full Cody-Voice-Identity-driven render path; W4
-        returns a static string so the actor has *something* to send
-        with the cortex call. The actor never inspects the string --
-        it threads it through to cortex verbatim.
+    # OQ-followup (OQ-W6-1): the W6 prompt-renderer plumbing wires the
+    # full Spec §4 templates through to cortex, but several inputs are
+    # still placeholders pending W7 integration:
+    #   * persona_voice_block -- full Cody Voice Identity render not
+    #     wired here; currently returns an empty stub. Will land when
+    #     lattice-persona-profile v0.1 is consumable.
+    #   * tool_list -- assembled by sorting the resolved tool name set,
+    #     but the human-friendly "what each tool does" descriptions are
+    #     not in the template surface yet (model sees names only).
+    #   * transcript_hot_window -- empty stub; the W3 transcript-buffer
+    #     `get_hot_window` is not yet bound here (lands in W7 AQH
+    #     integration alongside the wrap-up wiring).
+    #   * conversation_history / current_message_text -- the cortex
+    #     tool-use loop threads turns via its conversation messages
+    #     array, so these template tokens render to empty strings here.
+    # Surface follow-up filed at W6 close.
+
+    def _render_dm_system_prompt(self, *, event: object | None = None) -> str:
+        """Render the in-meeting-DM system prompt for the private path.
+
+        Pulled into a helper rather than embedded so the actor's
+        per-instance closure (constructed below in :meth:`_get_or_spawn_actor`)
+        can capture the sender context cleanly. The actor itself never
+        inspects the string -- it threads it through to cortex verbatim.
         """
-        # W5: full template render per Cody Voice Identity protocol.
-        return "You are the in-meeting assistant."
+        # OQ-followup: persona_voice_block + transcript_hot_window
+        # placeholders pending W7 (see OQ-W6-1 above).
+        sender_display = "Unknown Participant"
+        sender_canonical_id = "anonymous"
+        sender_confidence = 0.0
+        if event is not None:
+            sender_display = getattr(event, "sender_display_name", sender_display)
+            sender_canonical_id = getattr(event, "sender_canonical_id", None) or sender_canonical_id
+            sender_confidence = getattr(event, "sender_canonical_confidence", None) or 0.0
+
+        return render_in_meeting_dm_prompt(
+            meeting_title=self.meeting_id,  # v0.1 stub: meeting_id-as-title; W7 wires real title
+            persona_voice_block="",
+            tool_list=", ".join(sorted(self.in_meeting_tool_names)),
+            transcript_hot_window="",
+            sender_canonical_display_name=sender_display,
+            sender_canonical_id=sender_canonical_id,
+            sender_canonical_confidence=sender_confidence,
+        )
+
+    def _render_public_mention_system_prompt(self) -> str:
+        """Render the public-mention system prompt for the public path.
+
+        Same Cody Voice Identity scaffolding as
+        :meth:`_render_dm_system_prompt` but uses the public-variant
+        template per Spec §4 lines 644-671. The public actor binds
+        this method as its ``system_prompt_renderer`` -- no per-event
+        sender substitution needed (public mentions key on
+        ``(meeting_id, "public")``).
+        """
+        # OQ-followup: persona_voice_block + transcript_hot_window
+        # placeholders pending W7 (see OQ-W6-1 above).
+        return render_public_mention_prompt(
+            meeting_title=self.meeting_id,
+            persona_voice_block="",
+            tool_list=", ".join(sorted(self.in_meeting_tool_names)),
+            transcript_hot_window="",
+        )
+
+    def _render_system_prompt(self) -> str:
+        """No-arg DM-prompt renderer. Retained for back-compat with the
+        W4 actor wiring (private actors bind this via
+        :meth:`_make_dm_renderer_for_event`). For public actors, the
+        public-mention renderer is bound directly.
+        """
+        return self._render_dm_system_prompt(event=None)
+
+    def _make_dm_renderer_for_event(self, event: object) -> "Callable[[], str]":
+        """Return a no-arg closure that renders the DM prompt for
+        ``event``'s sender context.
+
+        The actor's ``system_prompt_renderer`` signature is no-arg, so
+        sender context has to be captured in the closure rather than
+        threaded through at call time.
+        """
+
+        def _render() -> str:
+            return self._render_dm_system_prompt(event=event)
+
+        return _render
 
     def _get_or_spawn_actor(self, event: object) -> ChatThreadActor:
-        """Return the actor for ``event``'s (meeting, persona) key.
+        """Return the actor for ``event``'s key.
 
         Spawns a fresh :class:`ChatThreadActor` on cache miss; cancels
         any pending reap timer for the key on cache hit (the sender
-        rejoined while the timer was still pending).
+        rejoined while the timer was still pending). Routes:
+
+        * private DM (``is_private=True``) -> key
+          ``(meeting_id, sender_canonical_id)`` + DM prompt renderer +
+          in-meeting-dm tool set.
+        * public mention (``is_private=False``) -> key
+          ``(meeting_id, "public")`` + public-mention prompt renderer +
+          same in-meeting-dm tool set (Invariant 2: same curated set
+          applies to both transports since both run in-meeting).
         """
         meeting_id = getattr(event, "meeting_id", self.meeting_id)
-        # W5/W6: derive thread_kind from event transport. v0.1 anchors
-        # on the meeting DM as the in-meeting case.
-        thread_kind: str = "in-meeting-dm"
         is_private = getattr(event, "is_private", True)
         if is_private:
             persona_id = getattr(event, "sender_canonical_id", None) or "anonymous"
             key: tuple[str, str] = (meeting_id, persona_id)
+            renderer: Callable[[], str] = self._make_dm_renderer_for_event(event)
         else:
             key = (meeting_id, "public")
-            thread_kind = "in-meeting-public"
+            renderer = self._render_public_mention_system_prompt
 
         if key in self._actors:
             # Cache hit -- cancel any reap timer that may still be
@@ -344,13 +439,13 @@ class Assistant:
             actor.cancel_idle()
             return actor
 
-        # Cache miss -- resolve the curated tool set for the transport
-        # and instantiate the actor.
-        # W5/W6: thread_kind may be "in-meeting-public" once the
-        # public-mention path lands; for W4 every routed event is a
-        # private DM so the curated in-meeting-dm tool set applies.
+        # Cache miss -- resolve the curated in-meeting-dm tool set.
+        # Both private DM and public mention bind to the in-meeting-dm
+        # transport per Invariant 2: same curated set, no personal-vault
+        # access. The public-mention prompt template ALSO instructs the
+        # model not to reveal vault access (defense in depth).
         tool_set = resolve_tool_set(
-            thread_kind="in-meeting-dm",  # W6: thread_kind for public
+            thread_kind="in-meeting-dm",
             profile=self.profile,
             transcript_buffer=self._transcript_buffer,
             brain_mcp=self._brain_mcp,
@@ -362,7 +457,7 @@ class Assistant:
             session=self._session,
             config=self.config,
             tool_set=tool_set,
-            system_prompt_renderer=self._render_system_prompt,
+            system_prompt_renderer=renderer,
         )
         actor.start()
         self._actors[key] = actor
@@ -513,11 +608,74 @@ class Assistant:
         await actor.shutdown()
 
     async def on_public_mention(self, event: object) -> None:
-        """Route public @-mention. W3 shell -- backfilled at W6.5."""
-        raise NotImplementedError(
-            "Assistant.on_public_mention lands at W6.5 -- the W4 shell "
-            "only ships the private-DM path."
+        """Route public @-mention into the per-meeting public actor.
+
+        Spec §3 lines 261-265 + spec §5 T11/T12. Order:
+
+        1. Invariant 4 fail-closed visibility check (missing/None
+           ``is_private`` -> :class:`PrivacyBoundaryViolation`).
+        2. :class:`PublicMentionHandler` policy gates:
+
+           * ``profile.public_mentions_enabled is False`` -> silent
+             decline (no reply, no actor spawn).
+           * ``profile.public_mention_allowlist`` set and sender NOT
+             listed -> silent decline.
+           * Per-meeting rate-limit window not yet elapsed -> silent
+             decline.
+
+        3. Spawn-or-reuse the singleton ``(meeting_id, "public")``
+           actor; enqueue the event. The actor's worker dispatches to
+           cortex and routes the reply via ``session.send_chat_public``.
+        4. Record the reply timestamp on the handler so the rate-limit
+           window applies to subsequent @-mentions in this meeting.
+
+        Public-mention queue-full backpressure: unlike the private DM
+        path, public mentions deliberately do NOT surface a backpressure
+        reply when the queue saturates -- a public-chat "I'm catching
+        up" string would (a) leak operational context to every
+        participant and (b) compound the loop-trigger risk that R5
+        defends against. Public mentions on a saturated queue silently
+        drop; the rate-limit gate already prevents the saturation
+        cause in practice.
+        """
+        # Step 1: Invariant 4 fail-closed.
+        enforce_visibility_tag(event)
+
+        # Step 2: policy gates.
+        meeting_id = getattr(event, "meeting_id", self.meeting_id)
+        sender_canonical_id = getattr(event, "sender_canonical_id", None)
+        verdict = self._public_mention_handler.evaluate(
+            meeting_id=meeting_id,
+            sender_canonical_id=sender_canonical_id,
         )
+        if verdict.decision != "allow":
+            logger.info(
+                "Assistant.on_public_mention: silent decline meeting_id=%s decision=%s reason=%s",
+                meeting_id,
+                verdict.decision,
+                verdict.reason,
+            )
+            return
+
+        # Step 3: spawn-or-reuse public actor + enqueue.
+        actor = self._get_or_spawn_actor(event)
+        ok = await actor.enqueue(event)  # type: ignore[arg-type]
+        if not ok:
+            # Saturated queue: silent drop (see docstring rationale).
+            logger.info(
+                "Assistant.on_public_mention: public actor queue full; "
+                "silent drop meeting_id=%s key=%s",
+                meeting_id,
+                actor.key,
+            )
+            return
+
+        # Step 4: record the reply timestamp so the rate-limit window
+        # ticks. We record on enqueue rather than on send_chat_public
+        # because the queue is bounded + serialized -- a successful
+        # enqueue is a near-certain reply (modulo cortex failure, which
+        # the actor handles with a fallback string).
+        self._public_mention_handler.record_reply(meeting_id=meeting_id)
 
     async def shutdown(self, *, drain_timeout_s: float = SHUTDOWN_DRAIN_TIMEOUT_DEFAULT_S) -> None:
         """Drain every actor in the pool, then cancel its worker.
