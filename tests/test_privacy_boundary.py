@@ -3,15 +3,17 @@
 Each test name embeds the Tx number so a reviewer can map test -> Tx at
 a glance. Docstrings cite the spec §5 table line each test backs.
 
-Status at W2 close (Sub-dispatch B):
+Status after W4.6 (Sub-dispatch B Part B):
 
-* PASS at W2: T4, T5, T8, T9 -- contract-level assertions backed by
-  Sub-dispatch A primitives in ``privacy/invariants.py``.
-* SKIPPED/XFAIL at W2: T1, T2, T3, T6, T7, T10, T11, T12 -- backed by
-  production code that lands in W3-W6 (and W7 for the wrap-up
-  integration in T3). Each is marked ``pytest.mark.xfail(strict=True)``
-  with a structured reason naming the fulfilling W-phase + spec §5
-  line so an unexpected pass surfaces immediately when the code lands.
+* PASS: T1, T4, T5, T6, T8, T9, T10 -- contract-level assertions backed
+  by Sub-dispatch A primitives in ``privacy/invariants.py`` plus the
+  W4.6 actor pool + global semaphore + on_private_chat routing.
+* SKIPPED/XFAIL: T2, T3, T7, T11, T12 -- backed by production code that
+  lands in W3 transcript filter (T2), W5 admin command parser (T7), W6
+  public mention (T11/T12), and W7 wrap-up integration (T3). Each is
+  marked ``pytest.mark.xfail(strict=True)`` with a structured reason
+  naming the fulfilling W-phase + spec §5 line so an unexpected pass
+  surfaces immediately when the code lands.
 
 Spec §5 table is at lines 706-719 of
 ``D:/Vaults/Mainframe/02_Projects/Lattice/lattice-meeting-assistant/
@@ -20,9 +22,21 @@ Specifications/2026-05-11 lattice-meeting-assistant v0.1 - Design Spec.md``.
 
 from __future__ import annotations
 
+import asyncio
+from datetime import datetime, timezone
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
-from lattice_meeting_assistant.config import KnowledgeAccessConfig
+from lattice_meeting_assistant import (
+    Assistant,
+    AssistantConfig,
+    AssistantProfile,
+    ChatEvent,
+    KnowledgeAccessConfig,
+)
+from lattice_meeting_assistant.brain_client import BrainMCPClient
 from lattice_meeting_assistant.exceptions import PrivacyBoundaryViolation
 from lattice_meeting_assistant.privacy.invariants import (
     assert_in_meeting_tools_safe,
@@ -30,31 +44,164 @@ from lattice_meeting_assistant.privacy.invariants import (
     enforce_visibility_tag,
 )
 
+
+# ---------------------------------------------------------------------------
+# Shared helpers for T1/T6/T10 (W4.6 backfill)
+# ---------------------------------------------------------------------------
+
+
+def _make_profile() -> AssistantProfile:
+    """Default profile satisfying Invariant 2 (allow_personal_vault=False)."""
+    knowledge = KnowledgeAccessConfig(
+        allow_personal_vault=False,
+        enable_past_meetings_search=True,
+        enable_public_references_tool=True,
+        enable_web_search=True,
+        public_references=("References/",),
+    )
+    return AssistantProfile(
+        profile_id="test-profile",
+        series_id="series-x",
+        dm_allowlist=("cyril-grosse",),
+        admins=("cyril-grosse",),
+        knowledge=knowledge,
+    )
+
+
+def _make_session() -> MagicMock:
+    """Session double whose async send_chat / send_chat_public are AsyncMocks."""
+    s = MagicMock()
+    s.send_chat = AsyncMock()
+    s.send_chat_public = AsyncMock()
+    return s
+
+
+def _make_event(
+    *,
+    sender_user_id: str,
+    sender_canonical_id: str,
+    text: str,
+    meeting_id: str = "m1",
+) -> ChatEvent:
+    return ChatEvent(
+        id=f"evt_{sender_user_id}_{text}",
+        meeting_id=meeting_id,
+        platform="zoom",
+        sender_user_id=sender_user_id,
+        sender_canonical_id=sender_canonical_id,
+        sender_canonical_confidence=0.95,
+        sender_display_name=sender_canonical_id,
+        text=text,
+        ts=datetime.now(timezone.utc),
+        is_private=True,
+    )
+
+
+def _make_assistant(
+    *,
+    registry: MagicMock,
+    session: MagicMock,
+    config: AssistantConfig | None = None,
+) -> Assistant:
+    asst = Assistant(
+        meeting_id="m1",
+        transcript_buffer=MagicMock(name="FakeTranscriptBuffer"),
+        brain_mcp=MagicMock(spec=BrainMCPClient),
+        config=config or AssistantConfig(),
+        profile=_make_profile(),
+        session=session,
+        cortex_registry=registry,
+    )
+    asst.start()
+    return asst
+
+
 # ---------------------------------------------------------------------------
 # T1 -- Two parallel DMs in same meeting: memory isolation (spec §5 L708)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "T1 boundary (spec §5 line 708): "
-        "skip-pending-W4-actor -- requires ChatThreadActor + "
-        "Assistant.on_private_chat (Plan task W4.6 backfills this test). "
-        "W2 only ships the Invariant 3 key helper "
-        "(privacy.invariants.thread_memory_key) covered by "
-        "test_privacy_invariants::test_invariant_3_per_thread_memory_isolation."
-    ),
-    strict=True,
-)
 async def test_T1_two_parallel_dms_memory_isolated() -> None:
     """T1 -- Two parallel DMs from senders A and B in same meeting.
 
     Spec §5 L708 asserts: memory contexts isolated; distinct cortex
     cache namespaces; replies sent to correct sender's ``userId`` only.
 
-    Backing impl lands in W4 (ChatThreadActor); see Plan task W4.6.
+    Backfilled at W4.6: the Assistant spawns one ``ChatThreadActor``
+    per ``(meeting_id, sender_canonical_id)`` key, threads the actor's
+    ``key`` through as ``cache_namespace`` in every cortex call, and
+    each actor's worker sends replies through
+    ``session.send_chat(to_user_id=...)`` addressed to the originating
+    sender's user id only.
     """
-    raise NotImplementedError("W4 ChatThreadActor not yet implemented")
+    session = _make_session()
+
+    # Custom cortex stub that returns a deterministic reply keyed on
+    # who asked, so we can assert the routing of each reply.
+    call_log: list[dict[str, Any]] = []
+
+    async def fake_call(**kwargs: Any) -> MagicMock:
+        call_log.append(kwargs)
+        conv = kwargs["conversation"]
+        last_user_text = conv[-1].content
+        result = MagicMock()
+        result.text = f"reply-to:{last_user_text}"
+        return result
+
+    registry = MagicMock()
+    registry.call = AsyncMock(side_effect=fake_call)
+
+    asst = _make_assistant(registry=registry, session=session)
+    try:
+        # Sender A in meeting m1.
+        ev_a = _make_event(
+            sender_user_id="user_A",
+            sender_canonical_id="alice",
+            text="ask from A",
+        )
+        # Sender B in same meeting m1.
+        ev_b = _make_event(
+            sender_user_id="user_B",
+            sender_canonical_id="bob",
+            text="ask from B",
+        )
+
+        await asst.on_private_chat(ev_a)
+        await asst.on_private_chat(ev_b)
+
+        # Drain both actors.
+        actor_a = asst._actors[("m1", "alice")]
+        actor_b = asst._actors[("m1", "bob")]
+        await actor_a.drain(timeout_s=2.0)
+        await actor_b.drain(timeout_s=2.0)
+    finally:
+        await asst.shutdown(drain_timeout_s=2.0)
+
+    # Two distinct actors stored under distinct keys.
+    assert actor_a is not actor_b
+
+    # Distinct cortex cache namespaces threaded through the calls.
+    cache_namespaces = {kw["cache_namespace"] for kw in call_log}
+    assert ("m1", "alice") in cache_namespaces
+    assert ("m1", "bob") in cache_namespaces
+    assert len(cache_namespaces) == 2
+
+    # Each reply went to the correct sender's user_id only.
+    send_calls = session.send_chat.await_args_list
+    assert len(send_calls) == 2
+    by_user = {c.kwargs["to_user_id"]: c.kwargs["message"] for c in send_calls}
+    assert by_user["user_A"] == "reply-to:ask from A"
+    assert by_user["user_B"] == "reply-to:ask from B"
+
+    # Histories memory-isolated: actor A's history has no trace of B's
+    # message and vice versa.
+    a_hist_text = " ".join(t.content for t in actor_a.history_snapshot())
+    b_hist_text = " ".join(t.content for t in actor_b.history_snapshot())
+    assert "ask from B" not in a_hist_text
+    assert "ask from A" not in b_hist_text
+
+    # Public broadcast path never used for private DMs.
+    session.send_chat_public.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -228,23 +375,58 @@ def test_T5_missing_or_none_visibility_tag_raises_privacy_boundary() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "T6 boundary (spec §5 line 713): "
-        "skip-pending-W3-cortex-cache-namespace -- requires cortex tool "
-        "registration with per-thread cache key derived from "
-        "privacy.invariants.thread_memory_key. W4.6 backfills the full "
-        "cross-sender invocation test."
-    ),
-    strict=True,
-)
 async def test_T6_cache_scope_per_thread() -> None:
     """T6 -- Same prompt from sender A and sender B.
 
     Spec §5 L713 asserts: two independent cortex calls; no cache hit
     cross-sender; verified via cortex ``cost_records`` row count.
+
+    Backfilled at W4.6: the Assistant's per-actor closure threads each
+    actor's ``key`` (``(meeting_id, persona_id)``) through as
+    ``cache_namespace`` in every ``cortex_call``. Two senders firing
+    the IDENTICAL prompt text produce TWO distinct cortex invocations
+    (one per actor) under distinct cache namespaces -- no de-dupe,
+    no shared cache.
     """
-    raise NotImplementedError("W3 cortex cache namespace not yet implemented")
+    session = _make_session()
+
+    call_log: list[dict[str, Any]] = []
+
+    async def fake_call(**kwargs: Any) -> MagicMock:
+        call_log.append(kwargs)
+        result = MagicMock()
+        result.text = "reply"
+        return result
+
+    registry = MagicMock()
+    registry.call = AsyncMock(side_effect=fake_call)
+
+    asst = _make_assistant(registry=registry, session=session)
+    try:
+        # IDENTICAL prompt text from two senders.
+        prompt = "what is the meaning of this?"
+        ev_a = _make_event(sender_user_id="user_A", sender_canonical_id="alice", text=prompt)
+        ev_b = _make_event(sender_user_id="user_B", sender_canonical_id="bob", text=prompt)
+
+        await asst.on_private_chat(ev_a)
+        await asst.on_private_chat(ev_b)
+
+        actor_a = asst._actors[("m1", "alice")]
+        actor_b = asst._actors[("m1", "bob")]
+        await actor_a.drain(timeout_s=2.0)
+        await actor_b.drain(timeout_s=2.0)
+    finally:
+        await asst.shutdown(drain_timeout_s=2.0)
+
+    # TWO distinct cortex invocations -- no de-dupe.
+    assert registry.call.await_count == 2
+    assert len(call_log) == 2
+
+    # Distinct cache namespaces; no shared/coalesced key.
+    namespaces = [kw["cache_namespace"] for kw in call_log]
+    assert ("m1", "alice") in namespaces
+    assert ("m1", "bob") in namespaces
+    assert namespaces[0] != namespaces[1]
 
 
 # ---------------------------------------------------------------------------
@@ -357,21 +539,100 @@ def test_T9_knowledge_config_personal_vault_defaults_false() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "T10 boundary (spec §5 line 717): "
-        "skip-pending-W4-actor-backpressure -- requires ChatThreadActor "
-        "FIFO + global semaphore. Plan task W4.6 backfills this test."
-    ),
-    strict=True,
-)
 async def test_T10_per_thread_queue_backpressure() -> None:
     """T10 -- Per-thread queue depth exceeded (6 msgs from one sender).
 
     Spec §5 L717 asserts: 6th msg triggers backpressure reply; 1-5
     still processed in FIFO; cortex calls bounded by global semaphore.
+
+    Backfilled at W4.6: the actor's bounded ``asyncio.Queue`` of depth
+    5 (default) rejects the 6th enqueue while the worker is held;
+    ``Assistant.on_private_chat`` surfaces the backpressure reply
+    via ``session.send_chat`` to the originating sender; once the
+    worker is released, msgs 1-5 process in submission order. The
+    global semaphore cap is covered separately by
+    ``tests/test_w4_global_semaphore.py``; here we focus on the
+    per-thread queue + backpressure-reply surface.
     """
-    raise NotImplementedError("W4 actor backpressure not yet implemented")
+    session = _make_session()
+    config = AssistantConfig()  # per_thread_queue_depth=5
+
+    gate = asyncio.Event()
+    processed: list[str] = []
+
+    async def fake_call(**kwargs: Any) -> MagicMock:
+        await gate.wait()
+        conv = kwargs["conversation"]
+        processed.append(conv[-1].content)
+        result = MagicMock()
+        result.text = f"done {conv[-1].content}"
+        return result
+
+    registry = MagicMock()
+    registry.call = AsyncMock(side_effect=fake_call)
+
+    asst = _make_assistant(registry=registry, session=session, config=config)
+    try:
+        # msg0 is picked up immediately by the worker (which blocks on
+        # the gate); wait for the queue to drop to 0 so the next 5
+        # enqueues land cleanly.
+        await asst.on_private_chat(
+            _make_event(
+                sender_user_id="user_A",
+                sender_canonical_id="alice",
+                text="msg0",
+            )
+        )
+        actor = asst._actors[("m1", "alice")]
+        for _ in range(100):
+            if actor.queue_depth == 0:
+                break
+            await asyncio.sleep(0.005)
+        assert actor.queue_depth == 0
+
+        # Fill the queue to depth=5 (msgs 1..5).
+        for i in range(1, 6):
+            await asst.on_private_chat(
+                _make_event(
+                    sender_user_id="user_A",
+                    sender_canonical_id="alice",
+                    text=f"msg{i}",
+                )
+            )
+        assert actor.queue_depth == 5
+
+        # No backpressure reply yet -- 1..5 all fit.
+        assert session.send_chat.await_count == 0
+
+        # 6th over-the-cap msg triggers the backpressure reply.
+        await asst.on_private_chat(
+            _make_event(
+                sender_user_id="user_A",
+                sender_canonical_id="alice",
+                text="msg6",
+            )
+        )
+        # Exactly one backpressure reply addressed to the sender.
+        assert session.send_chat.await_count == 1
+        bp = session.send_chat.await_args_list[0]
+        assert bp.kwargs["to_user_id"] == "user_A"
+        assert "catching up" in bp.kwargs["message"].lower()
+
+        # Release the gate; queue drains in FIFO order.
+        gate.set()
+        await actor.drain(timeout_s=2.0)
+    finally:
+        gate.set()
+        await asst.shutdown(drain_timeout_s=2.0)
+
+    # msgs 0..5 processed in FIFO; msg6 was rejected and never reached
+    # cortex (the backpressure reply substituted for it).
+    assert processed == ["msg0", "msg1", "msg2", "msg3", "msg4", "msg5"]
+
+    # The 5 real replies (msgs 1..5) plus the backpressure reply
+    # account for 6 send_chat calls; msg0's reply is also sent.
+    # Total = 1 backpressure + 6 real replies.
+    assert session.send_chat.await_count == 7
 
 
 # ---------------------------------------------------------------------------
