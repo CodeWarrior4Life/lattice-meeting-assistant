@@ -113,6 +113,8 @@ class ChatThreadActor:
         config: AssistantConfig,
         tool_set: list[CortexTool],
         system_prompt_renderer: Callable[[], str],
+        compactor: Callable[[list[ConversationTurn]], Awaitable[list[ConversationTurn]]]
+        | None = None,
     ) -> None:
         self.key = key
         self._cortex_call = cortex_call
@@ -120,6 +122,11 @@ class ChatThreadActor:
         self._config = config
         self._tool_set = tool_set
         self._system_prompt_renderer = system_prompt_renderer
+        # Compactor is optional. When ``None``, the actor falls back to
+        # a naive "drop oldest half" trim so a runaway history never
+        # crashes the worker. W5+ wires the cortex ``ContextCompactor``
+        # via this slot from :class:`Assistant`.
+        self._compactor = compactor
 
         # Bounded FIFO queue; spec §3 default per_thread_queue_depth=5.
         self._queue: asyncio.Queue[ChatEvent] = asyncio.Queue(maxsize=config.per_thread_queue_depth)
@@ -180,6 +187,25 @@ class ChatThreadActor:
         the returned list.
         """
         return list(self._history)
+
+    def seed_history(self, turns: list[ConversationTurn]) -> None:
+        """Pre-populate history for tests / replay.
+
+        Production code only appends via :meth:`_dispatch`; this hook
+        exists so the compaction tests can plant an oversized history
+        without having to round-trip N events through the actor first.
+        """
+        self._history = list(turns)
+
+    def history_token_estimate(self) -> int:
+        """Approximate token count via a char-based heuristic.
+
+        v0.1 uses ``sum(len(content)) // 4`` across all history turns
+        (spec §7 notes the tokenizer is not pinned in v0.1; this is
+        good enough for the 16k cap trigger). v0.2+ may wire a real
+        tokenizer through here.
+        """
+        return sum(len(t.content) for t in self._history) // 4
 
     async def wait_idle(self, *, timeout: float = 5.0) -> None:
         """Wait until the queue is empty AND no event is mid-dispatch.
@@ -316,9 +342,14 @@ class ChatThreadActor:
     async def _dispatch(self, event: ChatEvent) -> str:
         """Call cortex with current history + this event; update history.
 
-        Mirrors spec §7 pseudocode (lines 916-931). History compaction
-        (W4.4) hooks here; W4.1 ships the bare round-trip.
+        Mirrors spec §7 pseudocode (lines 916-931). When the history
+        token estimate exceeds :attr:`AssistantConfig.actor_history_max_tokens`
+        right before the round-trip, run :meth:`_compact_history` (which
+        delegates to the injected compactor or the naive fallback).
         """
+        if self.history_token_estimate() > self._config.actor_history_max_tokens:
+            self._history = await self._compact_history(self._history)
+
         user_turn = _event_to_turn(event)
         result = await self._cortex_call(
             consumer="lattice-meeting-assistant",
@@ -332,6 +363,24 @@ class ChatThreadActor:
         self._history.append(user_turn)
         self._history.append(_assistant_turn(text))
         return text
+
+    async def _compact_history(self, turns: list[ConversationTurn]) -> list[ConversationTurn]:
+        """Compact ``turns`` to fit under the token cap.
+
+        When a compactor was injected at construction time, defer to it
+        (production: cortex ``ContextCompactor`` per spec §7 line 987).
+        Otherwise apply a naive drop-oldest-half fallback so the actor
+        never dies on overflow.
+        """
+        if self._compactor is not None:
+            return await self._compactor(turns)
+        # Naive fallback: drop the oldest half, keep the back half
+        # verbatim. Preserves recency (the tail of conversation is what
+        # the model most needs).
+        if len(turns) <= 1:
+            return list(turns)
+        keep_from = len(turns) // 2
+        return turns[keep_from:]
 
 
 __all__ = ["ChatThreadActor"]
