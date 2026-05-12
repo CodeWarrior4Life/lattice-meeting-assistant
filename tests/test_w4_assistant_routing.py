@@ -354,3 +354,36 @@ async def test_shutdown_drains_all_actors() -> None:
     # Pool is empty, timers cleared.
     assert asst._actors == {}
     assert asst._reap_timers == {}
+
+
+async def test_shutdown_uses_config_drain_envelope_when_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``shutdown(drain_timeout_s=None)`` honors ``AssistantConfig`` value.
+
+    TKT-349645ab regression guard. With ``meeting_shutdown_drain_timeout_s``
+    promoted to ``AssistantConfig``, omitting the kwarg must source the
+    envelope from config -- not a module-level constant.
+    """
+    captured: list[float] = []
+
+    # Use a non-default config value to prove the envelope is plumbed.
+    cfg = AssistantConfig(meeting_shutdown_drain_timeout_s=7.0)
+    asst = _make_assistant(config=cfg)
+    try:
+        await asst.on_private_chat(_make_event(sender_user_id="u_alice"))
+        # Wrap each actor's drain to capture the timeout it receives.
+        for actor in list(asst._actors.values()):
+            original_drain = actor.drain
+
+            async def _drain(timeout_s: float, _orig: Any = original_drain) -> None:
+                captured.append(timeout_s)
+                await _orig(timeout_s=timeout_s)
+
+            monkeypatch.setattr(actor, "drain", _drain)
+    finally:
+        # Omit drain_timeout_s -> config envelope (7.0) applies.
+        await asst.shutdown()
+
+    # 1 actor in pool -> per_actor = 7.0 / 1 = 7.0 forwarded to drain.
+    assert captured == [7.0]

@@ -63,6 +63,10 @@ class AssistantConfig:
     per_meeting_global_concurrency: int = 4
     actor_post_leave_grace_s: int = 60
     actor_history_max_tokens: int = 16000
+    # Per-meeting drain envelope (spec §7 lifecycle table line 986).
+    # Honored by ``Assistant.shutdown`` when caller does not pass an
+    # explicit ``drain_timeout_s``.
+    meeting_shutdown_drain_timeout_s: float = 30.0
 
     # Memory (Q4c + Q6).
     remember_across_meetings: bool = False

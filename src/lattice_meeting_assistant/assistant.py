@@ -57,12 +57,6 @@ from .tools.resolver import resolve_tool_set
 logger = logging.getLogger(__name__)
 
 
-# Drain-timeout default for ``Assistant.shutdown``. Sourced from spec §7
-# lifecycle table (line 986: "Drain all queues (timeout=30s)").
-# OQ-followup: surface ``meeting_shutdown_drain_timeout_secs`` as a
-# config field on :class:`AssistantConfig` so consumers can tune.
-SHUTDOWN_DRAIN_TIMEOUT_DEFAULT_S: float = 30.0
-
 # Spec §5 line 714 verbatim phrasing for the in-meeting admin-command
 # rejection reply. Architectural Invariant 5 (Admin Surface Isolation):
 # admin commands route exclusively through TG transport; in-meeting DM
@@ -677,7 +671,7 @@ class Assistant:
         # the actor handles with a fallback string).
         self._public_mention_handler.record_reply(meeting_id=meeting_id)
 
-    async def shutdown(self, *, drain_timeout_s: float = SHUTDOWN_DRAIN_TIMEOUT_DEFAULT_S) -> None:
+    async def shutdown(self, *, drain_timeout_s: float | None = None) -> None:
         """Drain every actor in the pool, then cancel its worker.
 
         Spec §7 lifecycle table (line 986). Iterates a snapshot of the
@@ -688,7 +682,12 @@ class Assistant:
 
         Reap timers are cancelled before draining so the loop doesn't
         race with a fresh timer-driven reap on the same key.
+
+        When ``drain_timeout_s`` is ``None`` (the default) we fall back
+        to ``AssistantConfig.meeting_shutdown_drain_timeout_s``.
         """
+        if drain_timeout_s is None:
+            drain_timeout_s = self.config.meeting_shutdown_drain_timeout_s
         # Cancel pending reap timers first so we don't double-shutdown.
         for timer in list(self._reap_timers.values()):
             timer.cancel()

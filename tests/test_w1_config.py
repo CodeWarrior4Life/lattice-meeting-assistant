@@ -31,6 +31,8 @@ def test_assistant_config_defaults() -> None:
     assert cfg.per_meeting_global_concurrency == 4
     assert cfg.actor_post_leave_grace_s == 60
     assert cfg.actor_history_max_tokens == 16000
+    # Spec §7 lifecycle table (line 986) -- per-meeting drain envelope.
+    assert cfg.meeting_shutdown_drain_timeout_s == 30.0
     # Memory
     assert cfg.remember_across_meetings is False
     # Series
