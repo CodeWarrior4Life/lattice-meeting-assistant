@@ -154,6 +154,25 @@ class ChatThreadActor:
         except asyncio.QueueFull:
             return False
 
+    @property
+    def queue_depth(self) -> int:
+        """Current number of pending events in the FIFO queue.
+
+        Read-only observability hook for the :class:`Assistant`
+        backpressure reply path (W4.6 / Part B) and for tests.
+        """
+        return self._queue.qsize()
+
+    @property
+    def is_queue_full(self) -> bool:
+        """Predicate companion to :attr:`queue_depth`.
+
+        ``True`` iff a further :meth:`enqueue` call would return
+        ``False``. Cheap, side-effect-free; safe to call from the
+        Assistant's ``on_private_chat`` hot path.
+        """
+        return self._queue.full()
+
     def history_snapshot(self) -> list[ConversationTurn]:
         """Return a shallow copy of the in-memory conversation history.
 
