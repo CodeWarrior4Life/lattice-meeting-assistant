@@ -668,26 +668,94 @@ async def test_T10_per_thread_queue_backpressure() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Public-mention helpers (W6.5 backfill)
+# ---------------------------------------------------------------------------
+
+
+def _make_public_event(
+    *,
+    sender_user_id: str,
+    sender_canonical_id: str,
+    text: str,
+    meeting_id: str = "m1",
+) -> ChatEvent:
+    """Public @-mention event factory: ``is_private=False`` +
+    ``is_at_mention_to_bot=True``.
+    """
+    return ChatEvent(
+        id=f"evt_public_{sender_user_id}_{text}",
+        meeting_id=meeting_id,
+        platform="zoom",
+        sender_user_id=sender_user_id,
+        sender_canonical_id=sender_canonical_id,
+        sender_canonical_confidence=0.95,
+        sender_display_name=sender_canonical_id,
+        text=text,
+        ts=datetime.now(timezone.utc),
+        is_private=False,
+        is_at_mention_to_bot=True,
+    )
+
+
+# ---------------------------------------------------------------------------
 # T11 -- Public mention reply via send_chat_public only (spec §5 L718)
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "T11 boundary (spec §5 line 718): "
-        "skip-pending-W6-public-mention -- requires "
-        "Assistant.on_public_mention + public ChatThreadActor wiring. "
-        "Plan task W6.5 backfills this test."
-    ),
-    strict=True,
-)
 async def test_T11_public_mention_reply_via_send_chat_public_only() -> None:
     """T11 -- Public mention reply lands in public chat only.
 
     Spec §5 L718 asserts: sent via ``send_chat_public``, never via
     ``send_chat``; no private-thread mutation.
+
+    Backfilled at W6.5: ``Assistant.on_public_mention`` spawns the
+    singleton ``(meeting_id, "public")`` actor whose worker routes
+    replies through ``session.send_chat_public(message)`` per
+    Architectural Invariant 1. The actor's
+    :meth:`ChatThreadActor._send_reply` branches on
+    ``self.key[1] == "public"`` and never falls back to the private
+    ``send_chat`` path. No private-actor pool mutation: the
+    ``self._actors`` dict gains exactly one entry keyed on the
+    public-tuple key.
     """
-    raise NotImplementedError("W6 public mention handler not yet implemented")
+    session = _make_session()
+
+    captured: list[dict[str, Any]] = []
+
+    async def fake_call(**kwargs: Any) -> MagicMock:
+        captured.append(kwargs)
+        result = MagicMock()
+        result.text = "public reply"
+        return result
+
+    registry = MagicMock()
+    registry.call = AsyncMock(side_effect=fake_call)
+
+    asst = _make_assistant(registry=registry, session=session)
+    try:
+        ev = _make_public_event(
+            sender_user_id="user_A",
+            sender_canonical_id="alice",
+            text="@cody what was just said?",
+        )
+        await asst.on_public_mention(ev)
+
+        actor = asst._actors[("m1", "public")]
+        await actor.drain(timeout_s=2.0)
+
+        # No private-thread mutation: the only actor in the pool is the
+        # public singleton (assert PRE-shutdown -- shutdown clears the pool).
+        assert list(asst._actors.keys()) == [("m1", "public")]
+    finally:
+        await asst.shutdown(drain_timeout_s=2.0)
+
+    # Reply via send_chat_public; private send_chat NEVER touched.
+    assert session.send_chat_public.await_count == 1
+    session.send_chat.assert_not_awaited()
+
+    # Public-thread cache namespace threaded through cortex.
+    assert len(captured) == 1
+    assert captured[0]["cache_namespace"] == ("m1", "public")
 
 
 # ---------------------------------------------------------------------------
@@ -695,22 +763,106 @@ async def test_T11_public_mention_reply_via_send_chat_public_only() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "T12 boundary (spec §5 line 719): "
-        "skip-pending-W6-public-mention-isolation -- requires both "
-        "private and public ChatThreadActor paths active. Plan task "
-        "W6.5 backfills this test. W2 ships the per-thread memory key "
-        "helper (privacy.invariants.thread_memory_key) covered by "
-        "test_privacy_invariants::test_invariant_3_per_thread_memory_isolation."
-    ),
-    strict=True,
-)
 async def test_T12_private_and_public_thread_isolation_same_sender() -> None:
     """T12 -- Private DM + public mention from same sender in same meeting.
 
     Spec §5 L719 asserts: two independent ``ChatThreadActor`` instances;
     cortex calls in independent cache namespaces; replies do not
     commingle.
+
+    Backfilled at W6.5: when the same sender sends a private DM
+    (``is_private=True``) AND a public @-mention (``is_private=False``)
+    within the same meeting:
+
+    * Two distinct actor keys land in ``self._actors``:
+      ``(meeting_id, sender_canonical_id)`` for the private DM and
+      ``(meeting_id, "public")`` for the public mention.
+    * The cortex call for the private DM uses
+      ``cache_namespace=(meeting_id, sender_canonical_id)``; the
+      public call uses ``cache_namespace=(meeting_id, "public")``.
+      No commingling.
+    * The private reply routes via
+      ``session.send_chat(to_user_id=..., message=...)``; the public
+      reply routes via ``session.send_chat_public(message)``. No
+      cross-channel leak.
+    * The two actors' history buffers are independent; the private
+      DM text does NOT appear in the public actor's history (and vice
+      versa).
     """
-    raise NotImplementedError("W6 public + private isolation not yet implemented")
+    session = _make_session()
+
+    captured: list[dict[str, Any]] = []
+
+    async def fake_call(**kwargs: Any) -> MagicMock:
+        captured.append(kwargs)
+        # Echo back the conversation so we can verify isolation.
+        conv = kwargs["conversation"]
+        last_user_text = conv[-1].content
+        result = MagicMock()
+        result.text = f"reply-to:{last_user_text}"
+        return result
+
+    registry = MagicMock()
+    registry.call = AsyncMock(side_effect=fake_call)
+
+    asst = _make_assistant(registry=registry, session=session)
+    try:
+        # Private DM from alice.
+        private_ev = _make_event(
+            sender_user_id="user_A",
+            sender_canonical_id="alice",
+            text="please do not share this publicly",
+        )
+        # Public mention from alice in the same meeting.
+        public_ev = _make_public_event(
+            sender_user_id="user_A",
+            sender_canonical_id="alice",
+            text="@cody what was just discussed?",
+        )
+
+        await asst.on_private_chat(private_ev)
+        await asst.on_public_mention(public_ev)
+
+        private_actor = asst._actors[("m1", "alice")]
+        public_actor = asst._actors[("m1", "public")]
+
+        await private_actor.drain(timeout_s=2.0)
+        await public_actor.drain(timeout_s=2.0)
+    finally:
+        await asst.shutdown(drain_timeout_s=2.0)
+
+    # Two distinct actor instances.
+    assert private_actor is not public_actor
+
+    # Two cortex calls; distinct cache namespaces.
+    assert registry.call.await_count == 2
+    cache_namespaces = [kw["cache_namespace"] for kw in captured]
+    assert ("m1", "alice") in cache_namespaces
+    assert ("m1", "public") in cache_namespaces
+
+    # Private reply via send_chat(to_user_id=...); public via
+    # send_chat_public.
+    assert session.send_chat.await_count == 1
+    private_call = session.send_chat.await_args_list[0]
+    assert private_call.kwargs["to_user_id"] == "user_A"
+    assert "please do not share this publicly" in private_call.kwargs["message"]
+
+    assert session.send_chat_public.await_count == 1
+    public_call = session.send_chat_public.await_args_list[0]
+    public_msg = public_call.args[0] if public_call.args else public_call.kwargs.get("message", "")
+    assert "what was just discussed" in public_msg
+
+    # Histories are isolated: the private DM text never landed in the
+    # public actor's history and vice versa.
+    private_hist_text = " ".join(t.content for t in private_actor.history_snapshot())
+    public_hist_text = " ".join(t.content for t in public_actor.history_snapshot())
+    assert "please do not share this publicly" in private_hist_text
+    assert "please do not share this publicly" not in public_hist_text
+    assert "what was just discussed" in public_hist_text
+    assert "what was just discussed" not in private_hist_text
+
+    # Cortex system_prompts differ -- private uses the DM template,
+    # public uses the public-mention template.
+    by_ns = {kw["cache_namespace"]: kw["system_prompt"] for kw in captured}
+    assert "PUBLIC meeting chat" in by_ns[("m1", "public")]
+    assert "PUBLIC meeting chat" not in by_ns[("m1", "alice")]
