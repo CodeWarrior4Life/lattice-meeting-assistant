@@ -34,12 +34,14 @@ Sub-D scope (NOT in this module yet):
 from __future__ import annotations
 
 from .base import CortexTool, build_tool_spec, dispatch_tool_call
+from .past_meetings import SearchPastMeetingsTool
 from .transcript import ReadMeetingTranscriptWindowTool, SearchMeetingTranscriptTool
 
 __all__ = [
     "CortexTool",
     "ReadMeetingTranscriptWindowTool",
     "SearchMeetingTranscriptTool",
+    "SearchPastMeetingsTool",
     "build_tool_spec",
     "dispatch_tool_call",
 ]
