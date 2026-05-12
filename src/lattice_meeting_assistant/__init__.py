@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Literal
 
 from ._version import __version__
+from .actor import ChatThreadActor
 from .assistant import Assistant
 from .config import AssistantConfig, KnowledgeAccessConfig
 from .exceptions import (
@@ -38,6 +39,8 @@ __all__ = [
     "TierName",
     # Assistant
     "Assistant",
+    # Actor (W4)
+    "ChatThreadActor",
     # Exceptions
     "PrivacyBoundaryViolation",
     "AdminAuthorizationDenied",
