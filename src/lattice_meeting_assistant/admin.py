@@ -36,11 +36,9 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Final, Literal
 
-import yaml
-
 from .brain_client import BrainMCPClient, BrainMCPError
 from .exceptions import AdminAuthorizationDenied
-from .profile import AssistantProfile
+from .profile import AssistantProfile, render_profile_yaml
 from .types import AdminCommandResult, CanonicalPersonaId, ProfileMutation
 
 
@@ -468,61 +466,21 @@ class AdminCommandDispatcher:
 
 
 # ---------------------------------------------------------------------------
-# YAML rendering -- profile -> YAML string (PyYAML safe_dump).
+# YAML rendering -- profile -> YAML string (ruamel.yaml round-trip).
 # ---------------------------------------------------------------------------
 
 
 def _render_profile_yaml(profile: AssistantProfile) -> str:
-    """Serialize *profile* to YAML preserving field order.
+    """Serialize *profile* to YAML preserving comments + anchors + field order.
 
-    Uses PyYAML's ``safe_dump`` with ``sort_keys=False``. PyYAML does
-    not preserve comments or anchors; v0.2 OQ tracks the round-trip
-    upgrade to ``ruamel.yaml`` (see OQ-W5B-1 in the v0.2 OQ section).
-    Field order mirrors :func:`profile.dump_profile_to_yaml`.
+    Thin delegate over :func:`profile.render_profile_yaml`. The canonical
+    renderer lives in the profile module so the round-trip-mode
+    serializer config (preserve_quotes / indent / default_flow_style)
+    is owned in one place. TKT-b65ae591 upgraded the underlying engine
+    from PyYAML ``safe_dump`` to ``ruamel.yaml`` round-trip mode so
+    operator-authored comments survive admin write-back.
     """
-    payload: dict[str, Any] = {
-        "schema_version": profile.schema_version,
-        "profile_id": profile.profile_id,
-        "series_id": profile.series_id,
-        "dm_allowlist": list(profile.dm_allowlist),
-        "admins": list(profile.admins),
-        "dm_min_confidence": profile.dm_min_confidence,
-        "allow_mapped_dm": profile.allow_mapped_dm,
-        "allow_anonymous_dm": profile.allow_anonymous_dm,
-        "public_mentions_enabled": profile.public_mentions_enabled,
-        "public_mention_allowlist": (
-            list(profile.public_mention_allowlist)
-            if profile.public_mention_allowlist is not None
-            else None
-        ),
-        "public_mention_rate_limit_per_meeting_s": (
-            profile.public_mention_rate_limit_per_meeting_s
-        ),
-        "knowledge": {
-            "allow_personal_vault": profile.knowledge.allow_personal_vault,
-            "transcript_hot_window_seconds": (profile.knowledge.transcript_hot_window_seconds),
-            "enable_transcript_search_tool": (profile.knowledge.enable_transcript_search_tool),
-            "enable_past_meetings_search": (profile.knowledge.enable_past_meetings_search),
-            "enable_public_references_tool": (profile.knowledge.enable_public_references_tool),
-            "enable_web_search": profile.knowledge.enable_web_search,
-            "public_references": list(profile.knowledge.public_references),
-        },
-        "series_match_binding": profile.series_match_binding,
-        "series_match_confidence": profile.series_match_confidence,
-        "profile_vault_path": profile.profile_vault_path,
-        "in_memory_mutations_history": [
-            {
-                "ts": m.ts,
-                "action": m.action,
-                "target": m.target,
-                "by": m.by,
-                "session_id": m.session_id,
-            }
-            for m in profile.in_memory_mutations_history
-        ],
-    }
-    result: str = yaml.safe_dump(payload, sort_keys=False)
-    return result
+    return render_profile_yaml(profile)
 
 
 __all__ = [

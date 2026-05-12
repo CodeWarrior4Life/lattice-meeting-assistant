@@ -32,6 +32,10 @@ dependencies = [
     "httpx>=0.24.0",
     "pydantic>=2.0.0",
     "PyYAML>=6.0",
+    # ``ruamel.yaml`` is used by profile.py + admin.py for round-trip
+    # YAML serialization that preserves comments + anchors when an admin
+    # write-back mutates a Cyril-authored profile (TKT-b65ae591).
+    "ruamel.yaml>=0.18.0",
 ]
 
 [project.optional-dependencies]
