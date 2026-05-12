@@ -23,6 +23,7 @@ from .profile import (
     dump_profile_to_yaml,
     load_profile_from_yaml,
 )
+from .series import SeriesMatch, SeriesMatcher
 from .types import (
     AdminCommandResult,
     AssistantStats,
@@ -54,6 +55,9 @@ __all__ = [
     "ProfileMutation",
     "load_profile_from_yaml",
     "dump_profile_to_yaml",
+    # Series (W5)
+    "SeriesMatch",
+    "SeriesMatcher",
     # Types
     "ChatEvent",
     "ConversationTurn",
