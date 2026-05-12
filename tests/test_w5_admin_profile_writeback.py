@@ -48,7 +48,7 @@ def _make_profile(
     *,
     dm_allowlist: tuple[str, ...] = (),
     admins: tuple[str, ...] = ("cyril-grosse",),
-    source_vault_note: str | None = _VAULT_PATH,
+    profile_vault_path: str | None = _VAULT_PATH,
 ) -> AssistantProfile:
     knowledge = KnowledgeAccessConfig(
         allow_personal_vault=False,
@@ -63,7 +63,7 @@ def _make_profile(
         dm_allowlist=dm_allowlist,
         admins=admins,
         knowledge=knowledge,
-        source_vault_note=source_vault_note,
+        profile_vault_path=profile_vault_path,
     )
 
 
@@ -222,7 +222,7 @@ async def test_yaml_serialised_profile_round_trips_clean() -> None:
     assert set(parsed["dm_allowlist"]) == {"alice", "bob"}
     assert parsed["admins"] == ["cyril-grosse"]
     assert parsed["knowledge"]["allow_personal_vault"] is False
-    assert parsed["source_vault_note"] == _VAULT_PATH
+    assert parsed["profile_vault_path"] == _VAULT_PATH
 
 
 # ---------------------------------------------------------------------------
@@ -256,13 +256,13 @@ async def test_persistent_without_brain_raises_admin_command_error() -> None:
         )
 
 
-async def test_persistent_without_source_vault_note_raises() -> None:
-    """Profile lacks ``source_vault_note`` -> can't write back -> raise."""
-    profile = _make_profile(dm_allowlist=(), source_vault_note=None)
+async def test_persistent_without_profile_vault_path_raises() -> None:
+    """Profile lacks ``profile_vault_path`` -> can't write back -> raise."""
+    profile = _make_profile(dm_allowlist=(), profile_vault_path=None)
     brain = _make_brain()
     dispatcher, _holder = _make_dispatcher(profile=profile, brain=brain)
 
-    with pytest.raises(AdminCommandError, match="source_vault_note"):
+    with pytest.raises(AdminCommandError, match="profile_vault_path"):
         await dispatcher.dispatch(
             parse_admin_command("allowlist add user-x persistent"),
             ratifying_user="cyril-grosse",

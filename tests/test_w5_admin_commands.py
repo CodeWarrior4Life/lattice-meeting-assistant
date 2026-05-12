@@ -49,7 +49,7 @@ def _make_profile(
     *,
     dm_allowlist: tuple[str, ...] = (),
     admins: tuple[str, ...] = ("cyril-grosse",),
-    source_vault_note: str
+    profile_vault_path: str
     | None = "02_Projects/Lattice/lattice-meeting-assistant/Profiles/test.yaml",
 ) -> AssistantProfile:
     knowledge = KnowledgeAccessConfig(
@@ -65,7 +65,7 @@ def _make_profile(
         dm_allowlist=dm_allowlist,
         admins=admins,
         knowledge=knowledge,
-        source_vault_note=source_vault_note,
+        profile_vault_path=profile_vault_path,
     )
 
 

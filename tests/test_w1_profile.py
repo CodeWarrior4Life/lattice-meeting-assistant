@@ -47,7 +47,7 @@ def test_profile_yaml_roundtrip(tmp_path: Path) -> None:
         ),
         series_match_binding="explicit",
         series_match_confidence="high",
-        source_vault_note="02_Projects/.../Profiles/sabbath-school.yaml",
+        profile_vault_path="02_Projects/.../Profiles/sabbath-school.yaml",
     )
     yaml_path = tmp_path / "sabbath-school.yaml"
     dump_profile_to_yaml(src, yaml_path)

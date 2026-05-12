@@ -46,7 +46,7 @@ class AssistantProfile:
     series_match_confidence: SeriesMatchConfidence | None = None
 
     # Provenance.
-    source_vault_note: str | None = None
+    profile_vault_path: str | None = None
     in_memory_mutations_history: tuple[ProfileMutation, ...] = ()
 
 
@@ -117,9 +117,9 @@ def load_profile_from_yaml(path: Path) -> AssistantProfile:
 
     series_id_raw = raw.get("series_id")
     series_id: str | None = None if series_id_raw is None else str(series_id_raw)
-    source_vault_note_raw = raw.get("source_vault_note")
-    source_vault_note: str | None = (
-        None if source_vault_note_raw is None else str(source_vault_note_raw)
+    profile_vault_path_raw = raw.get("profile_vault_path")
+    profile_vault_path: str | None = (
+        None if profile_vault_path_raw is None else str(profile_vault_path_raw)
     )
 
     smb_raw = raw.get("series_match_binding", "none")
@@ -158,7 +158,7 @@ def load_profile_from_yaml(path: Path) -> AssistantProfile:
         ),
         series_match_binding=series_match_binding,
         series_match_confidence=series_match_confidence,
-        source_vault_note=source_vault_note,
+        profile_vault_path=profile_vault_path,
         in_memory_mutations_history=mutations,
     )
 
@@ -194,7 +194,7 @@ def dump_profile_to_yaml(profile: AssistantProfile, path: Path) -> None:
         },
         "series_match_binding": profile.series_match_binding,
         "series_match_confidence": profile.series_match_confidence,
-        "source_vault_note": profile.source_vault_note,
+        "profile_vault_path": profile.profile_vault_path,
         "in_memory_mutations_history": [
             {
                 "ts": m.ts,

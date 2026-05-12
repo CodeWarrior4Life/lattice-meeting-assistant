@@ -441,17 +441,17 @@ class AdminCommandDispatcher:
 
         Implementation of W5.5. Raises :class:`AdminCommandError` on
         Brain non-2xx or missing prerequisites (no brain_mcp wired, no
-        source_vault_note on the profile).
+        profile_vault_path on the profile).
         """
         if self._brain_mcp is None:
             raise AdminCommandError(
                 "persistent admin write requires a brain_mcp client; "
                 "Assistant was constructed without one."
             )
-        vault_path = new_profile.source_vault_note
+        vault_path = new_profile.profile_vault_path
         if not vault_path:
             raise AdminCommandError(
-                "persistent admin write requires profile.source_vault_note to be set; "
+                "persistent admin write requires profile.profile_vault_path to be set; "
                 f"profile_id={new_profile.profile_id!r} has no vault path."
             )
 
@@ -509,7 +509,7 @@ def _render_profile_yaml(profile: AssistantProfile) -> str:
         },
         "series_match_binding": profile.series_match_binding,
         "series_match_confidence": profile.series_match_confidence,
-        "source_vault_note": profile.source_vault_note,
+        "profile_vault_path": profile.profile_vault_path,
         "in_memory_mutations_history": [
             {
                 "ts": m.ts,
