@@ -59,6 +59,14 @@ from ..profile import AssistantProfile
 from .base import CortexTool
 from .past_meetings import SearchPastMeetingsTool
 from .public_references import SearchPublicReferencesTool
+from .tg_owner_tools import (
+    NxCalendarReadTool,
+    NxEmailSearchTool,
+    ReadNoteTool,
+    SearchReferencesTool,
+    SearchVaultTool,
+    VaultAskTool,
+)
 from .transcript import ReadMeetingTranscriptWindowTool, SearchMeetingTranscriptTool
 from .web_search import WebSearchTool
 
@@ -256,7 +264,18 @@ def _resolve_tg_owner_tools(
     if knowledge.enable_web_search:
         tools.append(WebSearchTool(brain_mcp=brain_mcp))
 
-    # Sub-D (W3.6): append the 6 TG-owner Nexus wrappers here.
+    # Sub-D (W3.6): the 6 TG-owner-only Nexus wrappers. These have no
+    # per-tool enable flags on ``KnowledgeAccessConfig`` for v0.1 --
+    # they are always-on for the TG-owner transport (the unscoped vault
+    # surface is the whole reason this transport exists). The resolver
+    # guards them behind ``brain_mcp is not None`` (no Brain -> no
+    # wrappers) which is already enforced by the early return above.
+    tools.append(SearchVaultTool(brain_mcp=brain_mcp))
+    tools.append(ReadNoteTool(brain_mcp=brain_mcp))
+    tools.append(SearchReferencesTool(brain_mcp=brain_mcp))
+    tools.append(NxCalendarReadTool(brain_mcp=brain_mcp))
+    tools.append(NxEmailSearchTool(brain_mcp=brain_mcp))
+    tools.append(VaultAskTool(brain_mcp=brain_mcp))
 
     return tools
 

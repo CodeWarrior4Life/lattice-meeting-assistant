@@ -189,6 +189,63 @@ class BrainMCPClient:
         payload: dict[str, Any] = {"query": query, "mode": mode}
         return await self._post("deep_research", payload)
 
+    # -----------------------------------------------------------------
+    # TG-owner-only endpoints (W3.6 consumes these). The resolver only
+    # registers the wrappers below when the transport is "tg-owner";
+    # the in-meeting-dm transport is forbidden from reaching these
+    # endpoints per ``BLOCKED_IN_MEETING_TOOLS`` + Architectural
+    # Invariant #2.
+    # -----------------------------------------------------------------
+
+    async def nx_read_note(self, *, path: str) -> dict[str, Any]:
+        """Read a single vault note by path.
+
+        TG-owner-only (``ReadNoteTool``). ``path`` is the vault-relative
+        path of the note; Brain returns the raw content + frontmatter.
+        """
+        payload: dict[str, Any] = {"path": path}
+        return await self._post("nx_read_note", payload)
+
+    async def nx_calendar_read(
+        self,
+        *,
+        time_range: str | None = None,
+        attendee: str | None = None,
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Read calendar events (TG-owner-only).
+
+        ``time_range`` is a Brain-side filter shape (e.g. ``"next_7d"``,
+        ``"today"``, an ISO date range). ``attendee`` filters to events
+        with a matching attendee; both args are optional.
+        """
+        payload: dict[str, Any] = {"limit": limit}
+        if time_range is not None:
+            payload["time_range"] = time_range
+        if attendee is not None:
+            payload["attendee"] = attendee
+        return await self._post("nx_calendar_read", payload)
+
+    async def nx_email_search(self, *, query: str, limit: int = 10) -> dict[str, Any]:
+        """Search emails (TG-owner-only).
+
+        Returns Brain's standard search-result envelope; the wrapper
+        tool (``NxEmailSearchTool``) re-shapes it into a simple list of
+        ``{subject, from, snippet}`` entries.
+        """
+        payload: dict[str, Any] = {"query": query, "limit": limit}
+        return await self._post("nx_email_search", payload)
+
+    async def vault_ask(self, *, question: str) -> dict[str, Any]:
+        """Natural-language Q&A over the vault (Brain RAG-shaped tool).
+
+        TG-owner-only (``VaultAskTool``). ``question`` is the
+        free-form user question; Brain returns ``{answer, citations,
+        ...}``.
+        """
+        payload: dict[str, Any] = {"question": question}
+        return await self._post("vault_ask", payload)
+
 
 __all__ = [
     "BrainMCPClient",
