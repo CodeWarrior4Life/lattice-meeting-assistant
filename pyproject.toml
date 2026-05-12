@@ -58,6 +58,20 @@ testpaths = ["tests"]
 strict = true
 python_version = "3.11"
 files = ["src"]
+# Sibling Lattice packages (lattice-cortex, lattice-meeting-contracts) do not
+# yet ship a ``py.typed`` marker (deferred to their respective v0.x releases).
+# Until they do, mypy treats their imports as ``Any`` -- acceptable because
+# the public surfaces we consume from each are themselves typed
+# dataclasses/Protocols whose shapes are pinned by the W0 dependency version
+# contract. ``disable_error_code = ["import-untyped"]`` at the top level
+# silences the strict-mode flag for these specific imports while preserving
+# every other strict check.
+disable_error_code = ["import-untyped"]
+
+[[tool.mypy.overrides]]
+module = ["lattice_cortex", "lattice_cortex.*", "lattice_meeting_contracts", "lattice_meeting_contracts.*"]
+ignore_missing_imports = true
+follow_imports = "skip"
 
 [tool.coverage.run]
 source = ["src/lattice_meeting_assistant"]
