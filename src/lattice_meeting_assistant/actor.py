@@ -33,10 +33,21 @@ tests pass a ``MagicMock``.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
+
+
+def _suppress_cancelled_error() -> contextlib.AbstractContextManager[None]:
+    """Context manager that swallows :class:`asyncio.CancelledError`.
+
+    Used during cleanup of racing tasks so a cancellation propagating
+    out of an awaited sub-task does not mask the original exception.
+    """
+    return contextlib.suppress(asyncio.CancelledError)
+
 
 from .config import AssistantConfig
 from .exceptions import CortexUnavailable
@@ -192,7 +203,7 @@ class ChatThreadActor:
             event = await self._queue.get()
             self._idle_since = None
             try:
-                reply = await self._dispatch(event)
+                reply = await self._dispatch_with_holding_message(event)
                 await self._send_reply(event, reply)
             except CortexUnavailable:
                 fallback = _filler("having_trouble_thinking_right_now")
@@ -215,6 +226,65 @@ class ChatThreadActor:
         Public-mention actors broadcast via ``send_chat_public``;
         private-DM actors use ``send_chat(to_user_id=..., message=...)``
         per Architectural Invariant 1.
+        """
+        if self.key[1] == "public":
+            await self._session.send_chat_public(text)  # type: ignore[attr-defined]
+        else:
+            await self._session.send_chat(  # type: ignore[attr-defined]
+                to_user_id=event.sender_user_id,
+                message=text,
+            )
+
+    async def _dispatch_with_holding_message(self, event: ChatEvent) -> str:
+        """Race the dispatch task against the holding-message threshold.
+
+        Spec §7 lines 934-954: if cortex does not return within
+        ``config.holding_message_after_ms``, send a filler stall
+        message to the user AND continue awaiting the real reply.
+
+        Implementation detail: ``asyncio.wait_for`` cancels the wrapped
+        task on timeout, so we cannot use it directly. Instead we
+        spawn ``_dispatch`` as a free-standing task and race it against
+        an ``asyncio.sleep`` timer via ``asyncio.wait``. On timeout we
+        send the filler and keep awaiting the dispatch task.
+        """
+        dispatch_task = asyncio.create_task(self._dispatch(event))
+        threshold_s = self._config.holding_message_after_ms / 1000.0
+        timer_task: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(threshold_s))
+        try:
+            done, _pending = await asyncio.wait(
+                {dispatch_task, timer_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if dispatch_task in done:
+                # Cortex returned before threshold -- cancel timer,
+                # return its result directly.
+                timer_task.cancel()
+                with _suppress_cancelled_error():
+                    await timer_task
+                return dispatch_task.result()
+            # Timer fired first -- send the filler, then await the
+            # real reply.
+            await self._send_filler(event, _filler("one_moment"))
+            return await dispatch_task
+        except BaseException:
+            # Defensive cleanup: if the worker is cancelled mid-race
+            # we MUST cancel the dispatch task so it does not leak.
+            if not dispatch_task.done():
+                dispatch_task.cancel()
+                with _suppress_cancelled_error():
+                    await dispatch_task
+            if not timer_task.done():
+                timer_task.cancel()
+                with _suppress_cancelled_error():
+                    await timer_task
+            raise
+
+    async def _send_filler(self, event: ChatEvent, text: str) -> None:
+        """Send a stall string via the same routed path as a real reply.
+
+        Separate from :meth:`_send_reply` because callers must not
+        record the filler in history -- it is a UX nudge, not a turn.
         """
         if self.key[1] == "public":
             await self._session.send_chat_public(text)  # type: ignore[attr-defined]
