@@ -37,6 +37,7 @@ from .base import CortexTool, build_tool_spec, dispatch_tool_call
 from .past_meetings import SearchPastMeetingsTool
 from .public_references import SearchPublicReferencesTool
 from .transcript import ReadMeetingTranscriptWindowTool, SearchMeetingTranscriptTool
+from .web_search import WebSearchTool
 
 __all__ = [
     "CortexTool",
@@ -44,6 +45,7 @@ __all__ = [
     "SearchMeetingTranscriptTool",
     "SearchPastMeetingsTool",
     "SearchPublicReferencesTool",
+    "WebSearchTool",
     "build_tool_spec",
     "dispatch_tool_call",
 ]
