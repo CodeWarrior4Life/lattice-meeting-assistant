@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lattice-meeting-assistant"
-version = "0.1.0.dev0"
+version = "0.1.0rc1"
 description = "In-meeting AI assistant primitive for Lattice meeting-platform adapters (Zoom v0.1; Meet/Teams v0.2+)."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -10,7 +10,7 @@ from __future__ import annotations
 def test_version_exposed() -> None:
     import lattice_meeting_assistant
 
-    assert lattice_meeting_assistant.__version__ == "0.1.0.dev0"
+    assert lattice_meeting_assistant.__version__ == "0.1.0rc1"
 
 
 def test_public_api_imports_clean() -> None:
