@@ -434,25 +434,57 @@ async def test_T6_cache_scope_per_thread() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "T7 boundary (spec §5 line 714): "
-        "skip-pending-W5-admin-command-parser -- requires Assistant "
-        "admin_command() + in-meeting DM rejection wiring. Plan task "
-        "W5.6 backfills this test. W2 ships the syntax detector "
-        "(privacy.invariants.is_admin_command_syntax + "
-        "assert_not_admin_in_meeting) covered by "
-        "test_privacy_invariants::test_invariant_5_admin_surface_isolation."
-    ),
-    strict=True,
-)
 async def test_T7_in_meeting_admin_command_rejected() -> None:
     """T7 -- In-meeting DM containing ``allowlist add X``.
 
     Spec §5 L714 asserts: reply: "admin commands not supported here";
     allowlist NOT mutated; no admin response sent.
+
+    Backfilled at W5.6: ``Assistant.on_private_chat`` detects admin
+    grammar via ``privacy.invariants.is_admin_command_syntax`` AFTER
+    visibility-tag enforcement and allowlist gate, but BEFORE
+    spawning an actor or routing to cortex. The Assistant replies via
+    ``session.send_chat(to_user_id=event.sender_user_id, message=...)``
+    with the stock string and returns. No mutation to ``profile.dm_allowlist``;
+    no Brain ``nx_vault_write`` call; no admin response sent.
     """
-    raise NotImplementedError("W5 admin command parser not yet implemented")
+    session = _make_session()
+    registry = MagicMock()
+    registry.call = AsyncMock()  # never called -- T7 rejects before cortex
+
+    asst = _make_assistant(registry=registry, session=session)
+    original_allowlist = asst.profile.dm_allowlist
+    try:
+        # Admin-grammar text on an in-meeting-dm event. Sender is in
+        # the allowlist so the tier gate doesn't silently deny first.
+        ev = _make_event(
+            sender_user_id="user_C",
+            sender_canonical_id="cyril-grosse",
+            text="allowlist add stranger",
+        )
+        await asst.on_private_chat(ev)
+
+        # Stock reply addressed to the originating sender.
+        assert session.send_chat.await_count == 1
+        send_call = session.send_chat.await_args_list[0]
+        assert send_call.kwargs["to_user_id"] == "user_C"
+        reply = send_call.kwargs["message"]
+        # Spec §5 line 714 verbatim phrasing.
+        assert reply == "admin commands not supported here"
+
+        # No actor spawned -- admin rejection short-circuits before _get_or_spawn_actor.
+        assert len(asst._actors) == 0
+
+        # Allowlist NOT mutated.
+        assert asst.profile.dm_allowlist == original_allowlist
+
+        # Cortex NOT called.
+        assert registry.call.await_count == 0
+
+        # Public broadcast path NOT touched.
+        session.send_chat_public.assert_not_awaited()
+    finally:
+        await asst.shutdown(drain_timeout_s=2.0)
 
 
 # ---------------------------------------------------------------------------

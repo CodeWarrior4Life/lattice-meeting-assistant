@@ -46,6 +46,7 @@ from .privacy.invariants import (
     BLOCKED_IN_MEETING_TOOLS,
     assert_in_meeting_tools_safe,
     enforce_visibility_tag,
+    is_admin_command_syntax,
 )
 from .profile import AssistantProfile
 from .tools.resolver import resolve_tool_set
@@ -58,6 +59,13 @@ logger = logging.getLogger(__name__)
 # OQ-followup: surface ``meeting_shutdown_drain_timeout_secs`` as a
 # config field on :class:`AssistantConfig` so consumers can tune.
 SHUTDOWN_DRAIN_TIMEOUT_DEFAULT_S: float = 30.0
+
+# Spec §5 line 714 verbatim phrasing for the in-meeting admin-command
+# rejection reply. Architectural Invariant 5 (Admin Surface Isolation):
+# admin commands route exclusively through TG transport; in-meeting DM
+# events matching admin grammar are rejected with this stock string and
+# never mutate profile state.
+ADMIN_NOT_SUPPORTED_HERE_REPLY: str = "admin commands not supported here"
 
 
 def _cortex_tool_use_available() -> bool:
@@ -363,14 +371,21 @@ class Assistant:
     async def on_private_chat(self, event: object) -> None:
         """Route private DM into per-(meeting, persona) actor.
 
-        Spec §7 lines 958-975. Order matters:
+        Spec §7 lines 958-975 + spec §5 line 714 (T7). Order matters:
 
         1. Invariant 4 fail-closed visibility check (missing/None
            ``is_private`` -> :class:`PrivacyBoundaryViolation`).
         2. Allowlist gate (W4 stub returns True; W5 implements the
            tier semantics + silent-deny on T3).
-        3. Spawn-or-reuse actor for the ``(meeting, persona)`` key.
-        4. ``enqueue`` -> on ``False`` (queue full), surface the
+        3. Admin-grammar rejection (Invariant 5, T7): the in-meeting-dm
+           transport rejects strings matching the admin grammar with
+           the stock reply. ``on_private_chat`` IS the in-meeting-dm
+           ingress in v0.1; this check fires unconditionally for events
+           that clear the allowlist gate. Non-allowlisted senders
+           sending admin grammar receive the silent T3 deny first --
+           no information leak about admin command syntax.
+        4. Spawn-or-reuse actor for the ``(meeting, persona)`` key.
+        5. ``enqueue`` -> on ``False`` (queue full), surface the
            backpressure reply via ``session.send_chat`` addressed to
            the originating ``sender_user_id``.
         """
@@ -383,7 +398,29 @@ class Assistant:
         if not self._is_allowed(sender_canonical_id, confidence=confidence):
             return  # silent deny -- no reply, no spam (spec §7 line 966)
 
-        # Step 3 + 4.
+        # Step 3: Invariant 5 admin-grammar rejection (T7).
+        # ``on_private_chat`` is the in-meeting-dm ingress -- admin
+        # commands route exclusively through TG transport per
+        # ``[[Meeting Platform Admin Surface Isolation]]``.
+        text = getattr(event, "text", "")
+        if is_admin_command_syntax(text):
+            sender_user_id = getattr(event, "sender_user_id", None)
+            if sender_user_id is not None and self._session is not None:
+                await self._session.send_chat(  # type: ignore[attr-defined]
+                    to_user_id=sender_user_id,
+                    message=ADMIN_NOT_SUPPORTED_HERE_REPLY,
+                )
+            else:
+                # Defensive: misconfigured caller. Log + return without
+                # spawning an actor or mutating state.
+                logger.warning(
+                    "Assistant.on_private_chat: admin-grammar event but no "
+                    "session/sender to reply via meeting_id=%s text=<redacted>",
+                    self.meeting_id,
+                )
+            return  # NEVER route to actor / cortex / Brain write-back
+
+        # Step 4 + 5.
         actor = self._get_or_spawn_actor(event)
         ok = await actor.enqueue(event)  # type: ignore[arg-type]
         if not ok:
