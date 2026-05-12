@@ -10,6 +10,13 @@ from typing import Literal
 
 from ._version import __version__
 from .actor import ChatThreadActor
+from .admin import (
+    AdminCommand,
+    AdminCommandDispatcher,
+    AdminCommandError,
+    AdminVerb,
+    parse_admin_command,
+)
 from .assistant import Assistant
 from .config import AssistantConfig, KnowledgeAccessConfig
 from .exceptions import (
@@ -58,6 +65,12 @@ __all__ = [
     # Series (W5)
     "SeriesMatch",
     "SeriesMatcher",
+    # Admin (W5.4)
+    "AdminCommand",
+    "AdminCommandDispatcher",
+    "AdminCommandError",
+    "AdminVerb",
+    "parse_admin_command",
     # Types
     "ChatEvent",
     "ConversationTurn",

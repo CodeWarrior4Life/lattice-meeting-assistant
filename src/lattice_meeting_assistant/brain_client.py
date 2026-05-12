@@ -246,6 +246,36 @@ class BrainMCPClient:
         payload: dict[str, Any] = {"question": question}
         return await self._post("vault_ask", payload)
 
+    async def nx_vault_write(
+        self,
+        *,
+        path: str,
+        content: str,
+        expected_mtime: float | None = None,
+    ) -> dict[str, Any]:
+        """Write *content* to vault note at *path* (TG-owner-only).
+
+        Used by the admin command dispatcher's persistent-allowlist path
+        (W5.5). ``content`` is the FULL serialised note body (YAML
+        frontmatter + body) -- Brain replaces the target file's content
+        in its entirety.
+
+        ``expected_mtime`` is an optional optimistic-concurrency token
+        Brain may use to reject the write if the file changed since the
+        client last read it (v0.1 callers pass ``None`` -- last-write-
+        wins is acceptable for the small admin-edit surface).
+
+        This method is registered in
+        :data:`lattice_meeting_assistant.privacy.invariants.BLOCKED_IN_MEETING_TOOLS`
+        and MUST NOT be exposed as an in-meeting cortex tool. Only the
+        admin dispatcher (which routes through the TG transport per
+        Invariant 5) is allowed to call it.
+        """
+        payload: dict[str, Any] = {"path": path, "content": content}
+        if expected_mtime is not None:
+            payload["expected_mtime"] = expected_mtime
+        return await self._post("nx_vault_write", payload)
+
 
 __all__ = [
     "BrainMCPClient",
