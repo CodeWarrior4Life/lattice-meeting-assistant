@@ -57,6 +57,14 @@ from .types import ChatEvent, ConversationTurn
 logger = logging.getLogger(__name__)
 
 
+# Lifecycle constants -- spec §7 lifecycle table (lines 977-987).
+# Part B / W4.6 reads this from the actor module when scheduling the
+# post-leave reap timer in the actor-pool. Mirrors
+# ``AssistantConfig.actor_post_leave_grace_s`` default so a reader of
+# the actor module sees the canonical value inline.
+POST_LEAVE_GRACE_SECS_DEFAULT: int = 60
+
+
 # Placeholder filler pool. W5 wires the persona profile filler pool per
 # Cody Voice Identity protocol; v0.1 uses a tiny in-line dict so the
 # actor can degrade gracefully before that lands.
@@ -220,6 +228,60 @@ class ChatThreadActor:
             if asyncio.get_event_loop().time() >= deadline:
                 raise asyncio.TimeoutError(f"actor {self.key} did not idle within {timeout}s")
             await asyncio.sleep(0.005)
+
+    # -----------------------------------------------------------------
+    # Lifecycle (W4.5) -- spec §7 lifecycle table (lines 977-987)
+    # -----------------------------------------------------------------
+
+    @property
+    def idle_since(self) -> float | None:
+        """Loop-clock timestamp set by :meth:`mark_idle`; ``None`` when
+        the actor is "live" (sender present in the meeting)."""
+        return self._idle_since
+
+    def mark_idle(self) -> None:
+        """Stamp the moment the sender left the meeting.
+
+        Part B / W4.6 calls this when a leave event arrives for the
+        sender associated with this private actor; combined with
+        :meth:`is_idle_for` the actor-pool can fire its 60s reap timer.
+        Public actors are not marked idle (they stay for the whole
+        meeting per the spec lifecycle table).
+        """
+        self._idle_since = asyncio.get_event_loop().time()
+
+    def cancel_idle(self) -> None:
+        """Clear the idle marker. Called when the sender rejoins."""
+        self._idle_since = None
+
+    def is_idle_for(self, secs: float) -> bool:
+        """Has the actor been idle for at least ``secs`` seconds?
+
+        Returns ``False`` when no idle marker is set, OR when the
+        elapsed time on the loop clock has not yet reached ``secs``.
+        """
+        if self._idle_since is None:
+            return False
+        elapsed = asyncio.get_event_loop().time() - self._idle_since
+        return elapsed >= secs
+
+    async def drain(self, *, timeout_s: float) -> None:
+        """Wait for the FIFO queue to empty AND the worker to settle.
+
+        Spec §7 line 985 + 986: the pool calls this from the reap
+        timer and from ``Assistant.shutdown``. Raises
+        :class:`asyncio.TimeoutError` when ``timeout_s`` elapses
+        before the queue empties; caller decides whether to escalate
+        to :meth:`shutdown` (cancel) or keep waiting.
+        """
+        deadline = asyncio.get_event_loop().time() + timeout_s
+        while True:
+            if self._queue.empty() and self._idle_since is not None:
+                return
+            remaining = deadline - asyncio.get_event_loop().time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError(f"actor {self.key} drain timed out after {timeout_s}s")
+            await asyncio.sleep(min(0.01, remaining))
 
     async def shutdown(self) -> None:
         """Cancel the worker task and wait for it to settle."""
