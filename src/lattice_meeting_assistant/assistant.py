@@ -257,16 +257,44 @@ class Assistant:
         async with self._global_semaphore:
             return await self._cortex_registry.call(**kwargs)  # type: ignore[attr-defined]
 
-    def _is_allowed(self, sender_canonical_id: str | None) -> bool:
-        """Tier check stub (W4); W5 implements the real allowlist gate.
+    def _is_allowed(
+        self,
+        sender_canonical_id: str | None,
+        *,
+        confidence: float | None,
+    ) -> bool:
+        """Allowlist tier check per spec §5 line 1009.
 
-        W5 will consult ``self.profile.dm_allowlist`` plus the Q4a
-        mapped-confidence tier. For W4 we accept every sender so the
-        ingest pipeline can be exercised end-to-end; the boundary
-        tests T1/T6/T10 do not depend on the allowlist semantics.
+        Three tiers (T1 / T2 / T3 are the spec's allowlist-tier names;
+        they are NOT the boundary-test names T1-T12):
+
+        * **T1** -- ``sender_canonical_id`` appears in
+          ``self.profile.dm_allowlist``. Allow unconditionally; confidence
+          is not consulted (explicit listing is final).
+        * **T2** -- ``sender_canonical_id`` resolves (not ``None``) AND
+          ``confidence is not None`` AND
+          ``confidence >= self.profile.dm_min_confidence``. Allow.
+        * **T3** -- everything else (no canonical id, no confidence, or
+          confidence below threshold). Default-deny; the caller surfaces
+          the deny silently (no reply, no spam per spec §7 line 966).
+
+        The min-confidence threshold is sourced from ``profile.dm_min_confidence``
+        (default 0.85; spec §3 line 341).
         """
-        # W5: tier check
-        return True
+        # T1 -- explicit allowlist hit wins unconditionally.
+        if sender_canonical_id is not None and sender_canonical_id in self.profile.dm_allowlist:
+            return True
+
+        # T3 -- unresolved persona id.
+        if sender_canonical_id is None:
+            return False
+
+        # T3 -- no confidence signal at all.
+        if confidence is None:
+            return False
+
+        # T2 / T3 split on confidence threshold.
+        return confidence >= self.profile.dm_min_confidence
 
     def _render_system_prompt(self) -> str:
         """Trivial system-prompt renderer for W4.
@@ -349,10 +377,11 @@ class Assistant:
         # Step 1: Invariant 4 fail-closed.
         enforce_visibility_tag(event)
 
-        # Step 2: allowlist tier gate (W5 backfills the real check).
+        # Step 2: allowlist tier gate (W5.1) -- T1/T2/T3 per spec §5 line 1009.
         sender_canonical_id = getattr(event, "sender_canonical_id", None)
-        if not self._is_allowed(sender_canonical_id):
-            return  # silent deny -- no reply, no spam
+        confidence = getattr(event, "sender_canonical_confidence", None)
+        if not self._is_allowed(sender_canonical_id, confidence=confidence):
+            return  # silent deny -- no reply, no spam (spec §7 line 966)
 
         # Step 3 + 4.
         actor = self._get_or_spawn_actor(event)
