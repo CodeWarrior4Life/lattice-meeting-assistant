@@ -35,6 +35,7 @@ from __future__ import annotations
 
 from .base import CortexTool, build_tool_spec, dispatch_tool_call
 from .past_meetings import SearchPastMeetingsTool
+from .public_references import SearchPublicReferencesTool
 from .transcript import ReadMeetingTranscriptWindowTool, SearchMeetingTranscriptTool
 
 __all__ = [
@@ -42,6 +43,7 @@ __all__ = [
     "ReadMeetingTranscriptWindowTool",
     "SearchMeetingTranscriptTool",
     "SearchPastMeetingsTool",
+    "SearchPublicReferencesTool",
     "build_tool_spec",
     "dispatch_tool_call",
 ]
