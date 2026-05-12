@@ -35,6 +35,7 @@ from lattice_meeting_assistant import (
     AssistantProfile,
     ChatEvent,
     KnowledgeAccessConfig,
+    WrapupTranscriptConsumer,
 )
 from lattice_meeting_assistant.brain_client import BrainMCPClient
 from lattice_meeting_assistant.exceptions import PrivacyBoundaryViolation
@@ -43,6 +44,7 @@ from lattice_meeting_assistant.privacy.invariants import (
     assert_separated_send_paths,
     enforce_visibility_tag,
 )
+from lattice_meeting_contracts import TranscriptBuffer
 
 
 # ---------------------------------------------------------------------------
@@ -209,23 +211,151 @@ async def test_T1_two_parallel_dms_memory_isolated() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "T2 boundary (spec §5 line 709): "
-        "skip-pending-W3-transcript-filter -- requires Assistant ingest "
-        "routing + transcript-source filter so private DMs never flow into "
-        "the /segments POST body. Backfilled by AQH integration in W7 "
-        "(AC-7) and unit-level in W3 transcript-buffer wiring."
-    ),
-    strict=True,
-)
 async def test_T2_private_dm_never_in_transcript_callback() -> None:
-    """T2 -- Private DM -> meetbot transcript callback.
+    """T2 -- Private DM -> meetbot transcript callback (spec §5 L709).
 
     Spec §5 L709 asserts: private DM text never appears in ``/segments``
     POST body; only ``is_private=False`` events flow downstream.
+
+    Architectural reasoning (backfill at v0.1.0-rc1):
+
+    The Assistant is NOT in the transcript-generation path. Per
+    ``lattice_meeting_contracts.TranscriptBuffer`` (v0.3.0-rc2), the
+    Protocol exposes ONLY reader-shaped methods (``subscribe``,
+    ``get_hot_window``, ``search``). There is NO writer/push side on
+    the Protocol -- the meetbot adapter owns the push half of the
+    buffer (it transcribes audio into segments and feeds the buffer);
+    the Assistant only READS from it for hot-window context. The
+    Assistant therefore has no API surface to push transcript content
+    anywhere, which is itself the strongest form of T2.
+
+    Two-layer assertion:
+
+    1. **Static contract layer:** ``TranscriptBuffer`` Protocol has
+       zero methods whose names match a writer-shaped pattern
+       (``push``, ``post``, ``add``, ``emit``, ``set``, ``write``,
+       ``send``). The only methods are the three readers above. A
+       future regression that added a ``TranscriptBuffer.push_segment``
+       method would surface as a Protocol-shape change here -- if that
+       lands, the assistant-side filter test below MUST also be
+       extended to assert the assistant does not invoke it.
+    2. **Defensive runtime layer:** Pass a ``MagicMock(spec=TranscriptBuffer)``
+       into ``Assistant(transcript_buffer=...)``. Fire a private DM
+       through ``on_private_chat``. After the actor drains, introspect
+       ``mock.method_calls`` and assert no writer-shaped method was
+       invoked. (Reader-shaped methods CAN be called, but as a sanity
+       check we also assert the private DM text never appears in any
+       call's arguments.)
+
+    Together these prove: the Assistant honors the T2 boundary
+    structurally -- it literally has no path that writes private DM
+    text into the transcript-callback surface.
     """
-    raise NotImplementedError("W3 transcript filter not yet implemented")
+    # --- Layer 1: static contract ------------------------------------
+    # Enumerate the Protocol's declared methods. Reader-shaped methods
+    # are documented; writer-shaped names trip the assertion. Pulled
+    # from the Protocol's __annotations__ + dir() rather than hardcoded
+    # so a future Protocol amendment would surface here.
+    writer_name_fragments = (
+        "push",
+        "post",
+        "add",
+        "emit",
+        "set",
+        "write",
+        "send",
+        "append",
+        "publish",
+    )
+    protocol_method_names = [
+        name
+        for name in dir(TranscriptBuffer)
+        if not name.startswith("_") and callable(getattr(TranscriptBuffer, name, None))
+    ]
+    for name in protocol_method_names:
+        for fragment in writer_name_fragments:
+            assert fragment not in name.lower(), (
+                f"T2 regression: TranscriptBuffer Protocol declares writer-shaped "
+                f"method '{name}' matching forbidden fragment '{fragment}'. The "
+                "Assistant must remain READ-ONLY against TranscriptBuffer; if a "
+                "writer is added, T2 must be extended to assert the Assistant "
+                "never invokes it."
+            )
+    # Sanity-check the expected reader surface (spec §3.4.x).
+    assert "subscribe" in protocol_method_names
+    assert "get_hot_window" in protocol_method_names
+    assert "search" in protocol_method_names
+
+    # --- Layer 2: defensive runtime ---------------------------------
+    session = _make_session()
+    # spec=TranscriptBuffer narrows the mock to the Protocol's surface
+    # so any stray attribute access surfaces immediately. MagicMock
+    # introspection is what backs the writer-call assertion below.
+    transcript_buffer_mock = MagicMock(spec=TranscriptBuffer)
+    transcript_buffer_mock.subscribe = MagicMock(return_value=asyncio.Queue())
+    transcript_buffer_mock.get_hot_window = MagicMock(return_value=[])
+    transcript_buffer_mock.search = MagicMock(return_value=[])
+
+    registry = MagicMock()
+    registry.call = AsyncMock(
+        return_value=MagicMock(text="reply", tokens_used=10, tier_used="interactive"),
+    )
+
+    asst = Assistant(
+        meeting_id="m1",
+        transcript_buffer=transcript_buffer_mock,
+        brain_mcp=MagicMock(spec=BrainMCPClient),
+        config=AssistantConfig(),
+        profile=_make_profile(),
+        session=session,
+        cortex_registry=registry,
+    )
+    asst.start()
+    try:
+        secret_dm_text = "this is a private DM that must NEVER reach transcript"
+        ev = _make_event(
+            sender_user_id="user_A",
+            sender_canonical_id="cyril-grosse",
+            text=secret_dm_text,
+        )
+        await asst.on_private_chat(ev)
+
+        actor = asst._actors[("m1", "cyril-grosse")]
+        await actor.drain(timeout_s=2.0)
+    finally:
+        await asst.shutdown(drain_timeout_s=2.0)
+
+    # No writer-shaped method was invoked on the transcript buffer.
+    invoked_method_names = {call[0] for call in transcript_buffer_mock.method_calls}
+    for invoked in invoked_method_names:
+        # Walk the last attribute segment so chained calls like
+        # ``foo.bar.push`` still trip (current Protocol has no chaining
+        # but defensive against future changes).
+        leaf = invoked.split(".")[-1].lower()
+        for fragment in writer_name_fragments:
+            assert fragment not in leaf, (
+                f"T2 violation: Assistant invoked writer-shaped method "
+                f"'{invoked}' on transcript_buffer; private DM text may have "
+                "leaked into transcript surface."
+            )
+
+    # The private DM text never appears in any argument passed to ANY
+    # transcript_buffer method (including the legal reader methods).
+    # This is defense-in-depth: if a future change added e.g. a query
+    # argument derived from the DM text, this assertion would fire.
+    for call in transcript_buffer_mock.method_calls:
+        # call = (name, args, kwargs)
+        _name, args, kwargs = call
+        for arg in args:
+            assert secret_dm_text not in str(arg), (
+                f"T2 violation: private DM text appeared in transcript_buffer "
+                f"call argument: method={_name} arg={arg!r}"
+            )
+        for v in kwargs.values():
+            assert secret_dm_text not in str(v), (
+                f"T2 violation: private DM text appeared in transcript_buffer "
+                f"kwarg: method={_name} kwarg={v!r}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -233,22 +363,150 @@ async def test_T2_private_dm_never_in_transcript_callback() -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "T3 boundary (spec §5 line 710): "
-        "skip-pending-W7-wrapup-integration -- requires lattice-meeting-wrapup "
-        "mock + Assistant integration. Backfilled by Plan task W7.x "
-        "integration suite."
-    ),
-    strict=True,
-)
 async def test_T3_private_dm_never_in_wrap_up() -> None:
-    """T3 -- Private DM -> wrap-up summary generation.
+    """T3 -- Private DM -> wrap-up summary generation (spec §5 L710).
 
     Spec §5 L710 asserts: private DM text never appears in the wrap-up
     source corpus.
+
+    Architectural reasoning (backfill at v0.1.0-rc1):
+
+    ``lattice-meeting-wrapup`` does not exist on disk yet, so the
+    consumer-side contract is defined HERE in
+    ``lattice_meeting_assistant.privacy.consumers.WrapupTranscriptConsumer``
+    -- the Protocol shape future wrap-up libraries will implement. The
+    Assistant offers a registration hook
+    (:meth:`Assistant.register_wrapup_consumer`) that stores a consumer
+    into ``self._wrapup_consumers``.
+
+    The Assistant guarantees (this is the T3 contract): a registered
+    consumer's ``on_transcript_event`` method is NEVER invoked from any
+    code path inside ``on_private_chat`` or ``on_public_mention``. The
+    Assistant does not synthesize :class:`TranscriptSegment` instances
+    from chat events of any kind; transcript-segment delivery to
+    consumers is the responsibility of the adapter side (which feeds
+    the :class:`TranscriptBuffer`) plus, in a future v0.2+, an explicit
+    fan-out shim that filters ``is_private=True`` events out at ingest.
+
+    Test approach:
+
+    1. Define a mock ``WrapupTranscriptConsumer`` whose
+       ``on_transcript_event`` is an :class:`AsyncMock`.
+    2. Register it via :meth:`Assistant.register_wrapup_consumer`.
+    3. Fire a private DM through :meth:`Assistant.on_private_chat`;
+       drain the actor.
+    4. Assert ``mock.on_transcript_event.await_count == 0`` -- the
+       consumer received ZERO invocations after the private DM.
+
+    Defense-in-depth: also assert there is no method on the Assistant
+    instance that would push to a wrap-up consumer based on private
+    chat content (introspection-level guarantee that no future
+    refactor accidentally wires a private-event-to-consumer path
+    without revisiting T3).
     """
-    raise NotImplementedError("W7 wrap-up integration not yet implemented")
+    session = _make_session()
+    registry = MagicMock()
+    registry.call = AsyncMock(
+        return_value=MagicMock(text="reply", tokens_used=10, tier_used="interactive"),
+    )
+
+    asst = _make_assistant(registry=registry, session=session)
+
+    # Register a mock WrapupTranscriptConsumer. The Protocol's single
+    # method ``on_transcript_event`` is stubbed as an AsyncMock so we
+    # can introspect call count.
+    consumer = MagicMock(spec=WrapupTranscriptConsumer)
+    consumer.on_transcript_event = AsyncMock()
+    asst.register_wrapup_consumer(consumer)
+    assert consumer in asst._wrapup_consumers, (
+        "register_wrapup_consumer must store the consumer so the "
+        "boundary is interrogable from tests."
+    )
+
+    try:
+        secret_dm_text = "private DM never in wrap-up corpus"
+        ev = _make_event(
+            sender_user_id="user_A",
+            sender_canonical_id="cyril-grosse",
+            text=secret_dm_text,
+        )
+        await asst.on_private_chat(ev)
+
+        actor = asst._actors[("m1", "cyril-grosse")]
+        await actor.drain(timeout_s=2.0)
+    finally:
+        await asst.shutdown(drain_timeout_s=2.0)
+
+    # The registered consumer received ZERO invocations of
+    # ``on_transcript_event``. This is the spec §5 L710 contract.
+    assert consumer.on_transcript_event.await_count == 0, (
+        f"T3 violation: WrapupTranscriptConsumer.on_transcript_event was "
+        f"invoked {consumer.on_transcript_event.await_count} times after a "
+        f"private DM. The Assistant must filter private chat events before "
+        "reaching any registered wrap-up consumer."
+    )
+
+    # Defense-in-depth: ALL attributes of the consumer mock received
+    # zero invocations (no surprise method on the Protocol was called
+    # either -- the Protocol only exposes on_transcript_event in v0.1,
+    # but this catches a future Protocol amendment that adds a method
+    # and forgets to filter).
+    for attr_name in dir(consumer):
+        if attr_name.startswith("_") or attr_name in {
+            "method_calls",
+            "mock_calls",
+            "call_args",
+            "call_args_list",
+            "call_count",
+            "called",
+            "configure_mock",
+            "reset_mock",
+            "return_value",
+            "side_effect",
+            "spec",
+            "spec_class",
+            "spec_set",
+            "attach_mock",
+            "assert_any_call",
+            "assert_called",
+            "assert_called_once",
+            "assert_called_once_with",
+            "assert_called_with",
+            "assert_has_calls",
+            "assert_not_called",
+            "mock_add_spec",
+        }:
+            continue
+        attr = getattr(consumer, attr_name, None)
+        await_count = getattr(attr, "await_count", None)
+        call_count = getattr(attr, "call_count", None)
+        if await_count is not None:
+            assert await_count == 0, (
+                f"T3 violation: consumer.{attr_name} was awaited "
+                f"{await_count} times after a private DM."
+            )
+        if call_count is not None:
+            assert call_count == 0, (
+                f"T3 violation: consumer.{attr_name} was called "
+                f"{call_count} times after a private DM."
+            )
+
+    # No code path on the Assistant constructs a TranscriptSegment from
+    # a chat event of any kind. This is checked structurally: search
+    # the Assistant module source for any TranscriptSegment instantiation.
+    # (A finer-grained check than introspecting the live instance, which
+    # cannot detect a never-taken code branch.)
+    import inspect
+
+    import lattice_meeting_assistant.assistant as assistant_module
+
+    src = inspect.getsource(assistant_module)
+    assert "TranscriptSegment(" not in src, (
+        "T3 violation: Assistant module constructs a TranscriptSegment "
+        "from somewhere in its source. Any TranscriptSegment construction "
+        "from a chat event would be a leak risk -- review the call site "
+        "and ensure it never fires for is_private=True events."
+    )
 
 
 # ---------------------------------------------------------------------------

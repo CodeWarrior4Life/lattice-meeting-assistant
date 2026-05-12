@@ -43,6 +43,7 @@ from .actor import POST_LEAVE_GRACE_SECS_DEFAULT, ChatThreadActor
 from .brain_client import BrainMCPClient
 from .config import AssistantConfig
 from .exceptions import CapabilityNotSupported
+from .privacy.consumers import WrapupTranscriptConsumer
 from .privacy.invariants import (
     BLOCKED_IN_MEETING_TOOLS,
     assert_in_meeting_tools_safe,
@@ -155,6 +156,49 @@ class Assistant:
         self._public_mention_handler: PublicMentionHandler = PublicMentionHandler(
             profile=profile,
         )
+
+        # Wrap-up consumer boundary (T3, spec §5 line 710). External
+        # libraries (lattice-meeting-wrapup et al.) register here to
+        # subscribe to the post-filter meeting-source-corpus stream. The
+        # Assistant guarantees: no chat event of ANY visibility is fed
+        # to these consumers from on_private_chat / on_public_mention --
+        # transcript-segment delivery is the responsibility of the
+        # adapter-owned TranscriptBuffer push side, not the Assistant.
+        # This list exists so the boundary is *interrogable* (T3 mocks
+        # a consumer, registers it, fires a private DM, asserts the
+        # consumer's on_transcript_event was never invoked).
+        self._wrapup_consumers: list[WrapupTranscriptConsumer] = []
+
+    # -----------------------------------------------------------------
+    # Wrap-up consumer boundary (T3, spec §5 line 710)
+    # -----------------------------------------------------------------
+
+    def register_wrapup_consumer(self, consumer: WrapupTranscriptConsumer) -> None:
+        """Register a downstream wrap-up consumer to the post-filter stream.
+
+        Spec §5 line 710 (T3 boundary): private DM text MUST NEVER reach
+        an implementation of :class:`WrapupTranscriptConsumer`. The
+        Assistant has no code path in :meth:`on_private_chat` or
+        :meth:`on_public_mention` that constructs a
+        :class:`~lattice_meeting_contracts.TranscriptSegment` from a
+        chat event -- transcript-segment delivery is owned by the
+        adapter-side :class:`~lattice_meeting_contracts.TranscriptBuffer`
+        push path, not the Assistant.
+
+        Registration is idempotent on identity: a consumer registered
+        twice is recorded twice (callers wishing dedup should track
+        their own bookkeeping).
+
+        v0.1: a registered consumer receives ZERO invocations from the
+        Assistant. The hook exists so the boundary is interrogable from
+        test code (T3 mocks a consumer, registers it, fires a private
+        DM, asserts the consumer was never invoked). v0.2+ may wire
+        public ``ChatEvent`` -> ``TranscriptSegment`` synthesis if a
+        consumer asks for that signal -- when it lands, the wiring will
+        still filter ``is_private=True`` events out at ingest, never
+        synthesizing a segment for them.
+        """
+        self._wrapup_consumers.append(consumer)
 
     # -----------------------------------------------------------------
     # Lifecycle

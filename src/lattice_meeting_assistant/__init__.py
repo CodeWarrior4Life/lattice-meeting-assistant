@@ -25,6 +25,7 @@ from .exceptions import (
     CortexUnavailable,
     PrivacyBoundaryViolation,
 )
+from .privacy.consumers import WrapupTranscriptConsumer
 from .profile import (
     AssistantProfile,
     dump_profile_to_yaml,
@@ -62,6 +63,8 @@ __all__ = [
     "ProfileMutation",
     "load_profile_from_yaml",
     "dump_profile_to_yaml",
+    # Privacy / consumer boundary Protocols
+    "WrapupTranscriptConsumer",
     # Series (W5)
     "SeriesMatch",
     "SeriesMatcher",

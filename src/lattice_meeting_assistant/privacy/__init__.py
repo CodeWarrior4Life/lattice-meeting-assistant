@@ -19,6 +19,7 @@ Plus log redaction (Q4c defense #3):
 
 from __future__ import annotations
 
+from .consumers import WrapupTranscriptConsumer
 from .invariants import (
     BLOCKED_IN_MEETING_TOOLS,
     assert_in_meeting_tools_safe,
@@ -32,6 +33,7 @@ from .log_redaction import log_chat_event
 
 __all__ = [
     "BLOCKED_IN_MEETING_TOOLS",
+    "WrapupTranscriptConsumer",
     "assert_in_meeting_tools_safe",
     "assert_not_admin_in_meeting",
     "assert_separated_send_paths",
