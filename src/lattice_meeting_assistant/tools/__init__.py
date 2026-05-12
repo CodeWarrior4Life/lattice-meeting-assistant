@@ -36,6 +36,7 @@ from __future__ import annotations
 from .base import CortexTool, build_tool_spec, dispatch_tool_call
 from .past_meetings import SearchPastMeetingsTool
 from .public_references import SearchPublicReferencesTool
+from .registry import ToolRegistry, build_registry
 from .transcript import ReadMeetingTranscriptWindowTool, SearchMeetingTranscriptTool
 from .web_search import WebSearchTool
 
@@ -45,7 +46,9 @@ __all__ = [
     "SearchMeetingTranscriptTool",
     "SearchPastMeetingsTool",
     "SearchPublicReferencesTool",
+    "ToolRegistry",
     "WebSearchTool",
+    "build_registry",
     "build_tool_spec",
     "dispatch_tool_call",
 ]
