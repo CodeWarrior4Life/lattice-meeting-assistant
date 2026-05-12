@@ -9,6 +9,7 @@ from __future__ import annotations
 from typing import Literal
 
 from ._version import __version__
+from .assistant import Assistant
 from .config import AssistantConfig, KnowledgeAccessConfig
 from .exceptions import (
     AdminAuthorizationDenied,
@@ -35,6 +36,8 @@ TierName = Literal["interactive", "research"]
 __all__ = [
     "__version__",
     "TierName",
+    # Assistant
+    "Assistant",
     # Exceptions
     "PrivacyBoundaryViolation",
     "AdminAuthorizationDenied",

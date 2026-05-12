@@ -215,14 +215,14 @@ def test_resolve_unknown_transport_raises_capability_not_supported() -> None:
 
 
 # ---------------------------------------------------------------------------
-# tg-owner path: Sub-C returns the 5 curated tools (Sub-D extends to 11)
+# tg-owner path: Sub-D returns 11 tools (5 curated + 6 TG-only wrappers)
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_tg_owner_returns_curated_tools_at_minimum() -> None:
-    """tg-owner transport MUST include all 5 in-meeting curated tools.
-    Sub-D adds the 6 TG-only Nexus wrappers; this test asserts the
-    Sub-C-shippable subset is present.
+def test_resolve_tg_owner_returns_eleven_tools() -> None:
+    """tg-owner transport: exactly 11 tools = 5 curated + 6 TG-owner
+    Nexus wrappers (Sub-D, W3.6). All names listed below come from the
+    Spec §4 enumeration.
     """
     profile = _make_profile()
     tools = resolve_tool_set(
@@ -232,13 +232,22 @@ def test_resolve_tg_owner_returns_curated_tools_at_minimum() -> None:
         brain_mcp=_fake_brain(),
     )
     names = {t.name for t in tools}
-    assert {
+    assert names == {
+        # Curated 5 (shared with in-meeting-dm)
         "search_meeting_transcript",
         "read_meeting_transcript_window",
         "search_past_meetings",
         "search_public_references",
         "web_search",
-    } <= names
+        # TG-owner-only 6 (Sub-D W3.6)
+        "search_vault",
+        "read_note",
+        "search_references",
+        "nx_calendar_read",
+        "nx_email_search",
+        "vault_ask",
+    }
+    assert len(tools) == 11
 
 
 def test_resolve_tg_owner_allows_personal_vault_true() -> None:
@@ -253,5 +262,25 @@ def test_resolve_tg_owner_allows_personal_vault_true() -> None:
         transcript_buffer=_fake_transcript_buffer(),
         brain_mcp=_fake_brain(),
     )
-    # No exception. The tool list at minimum contains the curated 5.
-    assert len(tools) >= 5
+    # No exception. With brain_mcp + default flags + allow_personal_vault
+    # we still get the full 11.
+    assert len(tools) == 11
+
+
+def test_resolve_tg_owner_brain_none_drops_brain_backed_tools() -> None:
+    """``brain_mcp=None`` on the tg-owner transport drops ALL Brain-backed
+    tools, including the 6 TG-owner wrappers (which all require Brain).
+    Only the two transcript tools survive.
+    """
+    profile = _make_profile()
+    tools = resolve_tool_set(
+        thread_kind="tg-owner",
+        profile=profile,
+        transcript_buffer=_fake_transcript_buffer(),
+        brain_mcp=None,
+    )
+    names = {t.name for t in tools}
+    assert names == {
+        "search_meeting_transcript",
+        "read_meeting_transcript_window",
+    }
